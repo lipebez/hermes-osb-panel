@@ -1,0 +1,11 @@
+{
+  "name": "hermes-osb-panel",
+  "label": "Open Second Brain",
+  "description": "Read-only visual companion for Open Second Brain snapshots.",
+  "icon": "BrainCircuit",
+  "version": "3.1.0",
+  "tab": { "path": "/second-brain", "position": "after:plugins" },
+  "entry": "dist/index.js",
+  "css": "dist/style.css?v=3.1.0",
+  "api": "plugin_api.py"
+}

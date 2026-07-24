@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  static-and-unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check JavaScript syntax
+        run: node --check dashboard/dist/index.js
+
+      - name: Run unit tests without bytecode
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests -v
+
+      - name: Scan committed public-release archive
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/check_public_release.py
+
+      - name: Check whitespace errors
+        run: git diff --check

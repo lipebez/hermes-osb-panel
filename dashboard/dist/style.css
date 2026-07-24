@@ -1,0 +1,417 @@
+/* ═══════════════════════════════════════════════════════════════
+   SECOND BRAIN — Obsidian Graph Focus v2.1
+   GitHub dark terminal aesthetic
+   ═══════════════════════════════════════════════════════════════ */
+.osb-app {
+  --bg-main: #0d1117;
+  --bg-panel: #161b22;
+  --bg-hover: #1c2128;
+  --bg-glass: rgba(22, 27, 34, 0.88);
+  --border: #30363d;
+  --border-light: #21262d;
+  --text-main: #c9d1d9;
+  --text-muted: #8b949e;
+  --text-dim: #6e7681;
+  --accent-blue: #58a6ff;
+  --accent-purple: #bc8cff;
+  --accent-green: #3fb950;
+  --accent-orange: #e3b341;
+  --accent-red: #ff7b72;
+  --accent-cyan: #79c0ff;
+  /* Area colors */
+  --area-brain: #bc8cff;
+  --area-inbox: #3fb950;
+  --area-projects: #58a6ff;
+  --area-clients: #e3b341;
+  --area-runbooks: #d2a8ff;
+  --area-decisions: #ff7b72;
+  --area-references: #79c0ff;
+  --area-templates: #7a7fad;
+  --area-other: #8b949e;
+}
+
+.osb-app, .osb-app *, .osb-app *::before, .osb-app *::after { box-sizing: border-box; margin: 0; padding: 0; -webkit-font-smoothing: antialiased; }
+
+.osb-app {
+  background-color: var(--bg-main);
+  color: var(--text-main);
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  font-size: 14px;
+}
+
+/* ── LOADING ── */
+.osb-app .osb-loading-screen {
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  height: 100%; gap: 16px; background: var(--bg-main);
+}
+.osb-app .osb-loader {
+  width: 32px; height: 32px;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent-purple);
+  border-radius: 50%;
+  animation: osb-spin 0.8s linear infinite;
+}
+@keyframes osb-spin { to { transform: rotate(360deg); } }
+.osb-app .osb-loading-screen p { color: var(--text-muted); font-size: 13px; }
+.osb-app .osb-error-text { color: var(--accent-red) !important; }
+
+/* ── APP SHELL ── */
+.osb-app { display: flex; flex-direction: column; height: 100%; min-height: 0; overflow: hidden; }
+
+/* ── HEADER ── */
+.osb-app header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 16px; height: 44px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.osb-app .header-left { display: flex; align-items: center; gap: 20px; }
+.osb-app .logo {
+  font-family: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-weight: 700; font-size: 13px; color: var(--accent-purple);
+  display: flex; align-items: center; gap: 6px; white-space: nowrap;
+}
+.osb-app .top-icons { display: flex; gap: 4px; }
+.osb-app .top-icon {
+  width: 28px; height: 28px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 6px; cursor: pointer; color: var(--text-muted);
+  font-size: 14px; transition: all 0.15s;
+}
+.osb-app .top-icon:hover { background: var(--bg-hover); color: var(--text-main); }
+.osb-app .top-icon.active { color: var(--accent-blue); background: rgba(56,139,253,0.1); }
+.osb-app .search {
+  background: var(--bg-main); border: 1px solid var(--border);
+  border-radius: 6px; padding: 6px 12px; color: var(--text-main);
+  width: 320px; max-width: 35vw;
+  font-family: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 12px;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.osb-app .search:focus { outline: none; border-color: var(--accent-blue); box-shadow: 0 0 0 3px rgba(88,166,255,0.1); }
+.osb-app .search::placeholder { color: var(--text-dim); }
+.osb-app .header-right { display: flex; gap: 12px; align-items: center; font-family: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 12px; }
+.osb-app .sync-on { color: var(--accent-green); }
+.osb-app .sync-off { color: var(--accent-red); }
+.osb-app .ver { color: var(--text-dim); }
+
+/* ── MAIN AREA: sidebar + workspace ── */
+.osb-app .main-area { display: flex; flex: 1; overflow: hidden; }
+
+/* ── SIDEBAR ── */
+.osb-app .sidebar {
+  width: 220px; background: var(--bg-panel);
+  border-right: 1px solid var(--border); padding: 12px;
+  overflow-y: auto; flex-shrink: 0;
+}
+.osb-app .sidebar-title {
+  font-family: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 11px;
+  color: var(--text-dim); text-transform: uppercase;
+  letter-spacing: 0.5px; margin-bottom: 8px; padding-left: 4px;
+}
+.osb-app .sidebar-count { font-size: 11px; color: var(--text-muted); margin-bottom: 10px; padding-left: 4px; }
+
+/* Folder groups with expand/collapse */
+.osb-app .folder-group { margin-bottom: 2px; }
+.osb-app .file-item {
+  padding: 5px 8px; border-radius: 4px; cursor: pointer;
+  display: flex; align-items: center; gap: 6px;
+  color: var(--text-main); font-size: 13px; margin-bottom: 1px;
+  transition: background 0.15s;
+}
+.osb-app .file-item:hover { background: var(--bg-hover); }
+.osb-app .file-item.active { background: rgba(56,139,253,0.1); color: var(--accent-blue); }
+.osb-app .file-item.folder { font-weight: 600; }
+.osb-app .folder-arrow {
+  display: inline-block; width: 12px; font-size: 10px;
+  color: var(--text-dim); transition: transform 0.15s;
+}
+.osb-app .folder-arrow.open { transform: rotate(90deg); }
+.osb-app .folder-name { flex: 1; }
+.osb-app .folder-count {
+  font-size: 10px; color: var(--text-dim);
+  font-family: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  background: rgba(255,255,255,0.06); padding: 1px 5px; border-radius: 3px;
+}
+.osb-app .folder-children { margin-left: 18px; margin-bottom: 4px; }
+.osb-app .file-item.child {
+  font-size: 12px; color: var(--text-muted); font-weight: 400;
+  padding: 4px 8px;
+}
+.osb-app .file-item.child:hover { color: var(--text-main); }
+.osb-app .file-item.child.active { color: var(--accent-blue); }
+
+/* Area-colored dots */
+.osb-app [class^="dot-"], .osb-app [class*=" dot-"] {
+  width: 8px; height: 8px; border-radius: 50%;
+  display: inline-block; flex-shrink: 0;
+}
+.osb-app .dot-brain { background: var(--area-brain); }
+.osb-app .dot-vault, .osb-app .dot-projects { background: var(--area-projects); }
+.osb-app .dot-inbox { background: var(--area-inbox); }
+.osb-app .dot-clients { background: var(--area-clients); }
+.osb-app .dot-runbooks { background: var(--area-runbooks); }
+.osb-app .dot-decisions { background: var(--area-decisions); }
+.osb-app .dot-references { background: var(--area-references); }
+.osb-app .dot-templates { background: var(--area-templates); }
+.osb-app .dot-other { background: var(--area-other); }
+.osb-app .dot-active { background: #f7f8f8; }
+.osb-app .dot-preference { background: var(--accent-purple); }
+.osb-app .dot-signal { background: var(--accent-green); }
+.osb-app .dot-log { background: #7a7fad; }
+.osb-app .dot-retired { background: #62666d; }
+.osb-app .dot-note { background: var(--accent-blue); }
+
+/* Filter chips */
+.osb-app .filter-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.osb-app .chip {
+  background: var(--bg-main); border: 1px solid var(--border);
+  border-radius: 4px; padding: 3px 8px; font-size: 11px;
+  font-family: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace; color: var(--text-muted);
+  cursor: pointer; transition: all 0.15s;
+}
+.osb-app .chip:hover { border-color: var(--accent-blue); color: var(--text-main); }
+.osb-app .chip.active { background: rgba(56,139,253,0.12); border-color: var(--accent-blue); color: var(--accent-blue); }
+
+/* Stat grid */
+.osb-app .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.osb-app .stat-item {
+  background: var(--bg-main); border: 1px solid var(--border-light);
+  border-radius: 6px; padding: 8px; text-align: center;
+}
+.osb-app .stat-val { display: block; font-size: 18px; font-weight: 700; color: var(--text-main); font-family: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+.osb-app .stat-lbl { display: block; font-size: 10px; color: var(--text-dim); text-transform: uppercase; margin-top: 2px; }
+
+/* ── WORKSPACE: graph + note + bottom ── */
+.osb-app .workspace { display: flex; flex-direction: column; flex: 1; overflow: hidden; }
+.osb-app .workspace-top { display: flex; flex: 1; overflow: hidden; min-height: 0; }
+
+/* ── NOTE PANE ── */
+.osb-app .note-pane {
+  width: 320px; background: var(--bg-main);
+  border-right: 1px solid var(--border);
+  overflow-y: auto; padding: 20px 24px;
+  display: flex; flex-direction: column; flex-shrink: 0;
+}
+.osb-app .properties-block {
+  background: var(--bg-panel); border: 1px solid var(--border);
+  border-radius: 8px; padding: 12px; margin-bottom: 16px; font-size: 13px;
+}
+.osb-app .prop-row { display: flex; gap: 8px; margin-bottom: 5px; align-items: center; }
+.osb-app .prop-row:last-child { margin-bottom: 0; }
+.osb-app .prop-key { color: var(--text-dim); font-family: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace; min-width: 50px; font-size: 11px; }
+.osb-app .prop-path { font-family: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 11px; color: var(--text-muted); word-break: break-all; }
+.osb-app .tag {
+  padding: 2px 8px; border-radius: 4px; font-size: 11px;
+  font-family: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  background: rgba(188,140,255,0.1); color: var(--accent-purple);
+}
+.osb-app .tag-vault { background: rgba(88,166,255,0.1); color: var(--accent-blue); }
+.osb-app .tag-active { background: rgba(255,255,255,0.08); color: #f7f8f8; }
+.osb-app .tag-signal { background: rgba(63,185,80,0.1); color: var(--accent-green); }
+.osb-app .tag-log { background: rgba(122,127,173,0.12); color: #7a7fad; }
+.osb-app .note-title {
+  font-size: 22px !important; font-weight: 700; margin-bottom: 10px;
+  line-height: 1.25; letter-spacing: -0.15px; color: #f0f6fc;
+}
+.osb-app .note-content { flex: 1; }
+.osb-app .note-preview-text {
+  font-family: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 12px; line-height: 1.6;
+  color: var(--text-muted); white-space: pre-wrap; word-break: break-word;
+  max-height: 350px; overflow-y: auto; padding: 12px;
+  background: rgba(0,0,0,0.2); border-radius: 8px; border: 1px solid var(--border-light);
+}
+
+/* Backlinks */
+.osb-app .backlinks-section { margin-top: 16px; }
+.osb-app .backlinks-title {
+  font-family: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 11px;
+  color: var(--text-dim); text-transform: uppercase;
+  margin-bottom: 8px; letter-spacing: 0.5px;
+}
+.osb-app .backlink-item {
+  background: var(--bg-panel); border: 1px solid var(--border-light);
+  border-radius: 6px; padding: 7px 10px; margin-bottom: 4px; cursor: pointer;
+  display: flex; align-items: center; gap: 8px; transition: border-color 0.15s, background 0.15s;
+}
+.osb-app .backlink-item:hover { border-color: var(--accent-blue); background: var(--bg-hover); }
+.osb-app .backlink-label { flex: 1; font-size: 13px; color: var(--text-main); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.osb-app .backlink-kind { font-size: 10px; font-family: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace; color: var(--text-dim); background: rgba(255,255,255,0.04); padding: 1px 5px; border-radius: 3px; }
+.osb-app .no-backlinks { color: var(--text-dim); font-size: 13px; padding: 4px 0; }
+.osb-app .empty-note { display: flex; align-items: center; justify-content: center; flex: 1; color: var(--text-dim); }
+
+/* ── GRAPH PANE ── */
+.osb-app .graph-pane {
+  flex: 1; position: relative;
+  background: radial-gradient(ellipse at center, #111a23 0%, #0d1117 100%);
+  overflow: hidden; min-width: 300px;
+}
+.osb-app #graphCanvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; cursor: grab; display: block; }
+.osb-app #graphCanvas:active { cursor: grabbing; }
+.osb-app .graph-controls {
+  position: absolute; top: 12px; right: 12px;
+  background: var(--bg-glass); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--border); border-radius: 8px; padding: 4px;
+  display: flex; flex-direction: column; gap: 2px; z-index: 10;
+}
+.osb-app .control-btn {
+  position: relative; width: 30px; height: 30px; display: flex; align-items: center; justify-content: center;
+  color: var(--text-muted); border: 0; background: transparent; border-radius: 4px; cursor: pointer;
+  font-family: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-weight: 590; font-size: 12px; transition: all 0.15s;
+}
+.osb-app .control-btn:hover { background: var(--bg-hover); color: var(--accent-blue); }
+.osb-app .control-btn:disabled { opacity: .3; cursor: not-allowed; }
+.osb-app .control-btn::after {
+  content: attr(data-tooltip); position: absolute; right: 36px; top: 50%; transform: translateY(-50%);
+  display: none; width: max-content; max-width: 160px; padding: 4px 6px; border: 1px solid var(--border);
+  border-radius: 4px; background: #111820; color: var(--text-main); font: 500 9px ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  box-shadow: 0 6px 20px rgba(0,0,0,.35); pointer-events: none; white-space: nowrap;
+}
+.osb-app .control-btn:not(:disabled):hover::after, .osb-app .control-btn:not(:disabled):focus-visible::after { display: block; }
+.osb-app .graph-info {
+  position: absolute; bottom: 12px; left: 12px;
+  background: var(--bg-glass); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px;
+  font-family: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 11px; color: var(--text-dim);
+  display: flex; gap: 14px; z-index: 10; max-width: calc(100% - 24px); overflow: hidden;
+}
+.osb-app .graph-info .val { color: var(--text-main); font-weight: 600; }
+
+/* ── BOTTOM PANEL ── */
+.osb-app .bottom-panel {
+  height: clamp(280px, 44vh, 340px); flex-shrink: 0;
+  background: var(--bg-panel); border-top: 1px solid var(--border);
+  display: flex; flex-direction: column;
+}
+.osb-app .bp-tabs {
+  display: flex; gap: 2px; padding: 0 8px;
+  border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+.osb-app .bp-tab {
+  background: none; border: none; border-bottom: 2px solid transparent;
+  padding: 8px 14px; color: var(--text-muted); font-size: 12px;
+  font-family: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace; cursor: pointer;
+  display: flex; align-items: center; gap: 6px; transition: all 0.15s;
+}
+.osb-app .bp-tab:hover { color: var(--text-main); }
+.osb-app .bp-tab.active { color: var(--accent-blue); border-bottom-color: var(--accent-blue); }
+.osb-app .bp-count {
+  font-size: 10px; background: rgba(255,255,255,0.08);
+  padding: 1px 5px; border-radius: 3px; color: var(--text-dim);
+}
+.osb-app .bp-content { flex: 1; overflow-y: auto; padding: 10px; }
+.osb-app .bp-empty { color: var(--text-dim); padding: 20px; text-align: center; font-size: 13px; }
+.osb-app .bp-pre {
+  font-family: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 12px;
+  line-height: 1.6; color: var(--text-muted); white-space: pre-wrap;
+  word-break: break-word; padding: 12px; background: rgba(0,0,0,0.2);
+  border-radius: 8px; border: 1px solid var(--border-light);
+}
+.osb-app .bp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
+.osb-app .bp-log-card {
+  background: var(--bg-main); border: 1px solid var(--border-light);
+  border-radius: 6px; padding: 8px 10px; display: flex; flex-direction: column; gap: 3px;
+}
+.osb-app .bp-log-time { font-family: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 10px; color: var(--text-dim); }
+.osb-app .bp-log-kind { font-size: 11px; color: var(--accent-purple); font-family: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+.osb-app .bp-log-text { font-size: 12px; color: var(--text-main); line-height: 1.4; }
+.osb-app .bp-log-agent { font-size: 10px; color: var(--accent-green); font-family: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+.osb-app .bp-art-card, .osb-app .bp-vault-card {
+  background: var(--bg-main); border: 1px solid var(--border-light);
+  border-radius: 6px; padding: 8px 10px; cursor: pointer;
+  display: flex; flex-direction: column; gap: 3px; transition: border-color 0.15s;
+}
+.osb-app .bp-art-card:hover, .osb-app .bp-vault-card:hover { border-color: var(--accent-blue); }
+.osb-app .bp-art-card.selected, .osb-app .bp-vault-card.selected { border-color: var(--accent-blue); background: rgba(56,139,253,0.06); }
+.osb-app .bp-art-kind, .osb-app .bp-vault-area { font-size: 10px; font-family: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace; display: flex; align-items: center; gap: 5px; }
+.osb-app .bp-art-label, .osb-app .bp-vault-label { font-size: 13px; color: var(--text-main); }
+.osb-app .bp-art-topic { font-size: 10px; color: var(--text-dim); }
+.osb-app .bp-vault-path { font-size: 10px; color: var(--text-dim); font-family: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace; word-break: break-all; }
+
+/* ── STATUS BAR ── */
+.osb-app .status-bar {
+  height: 24px; background: var(--bg-panel);
+  border-top: 1px solid var(--border); color: var(--text-dim);
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 12px; font-family: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 11px; flex-shrink: 0;
+}
+.osb-app .status-left, .osb-app .status-right { display: flex; gap: 14px; align-items: center; }
+
+/* ── SCROLLBAR ── */
+.osb-app ::-webkit-scrollbar { width: 6px; height: 6px; }
+.osb-app ::-webkit-scrollbar-track { background: transparent; }
+.osb-app ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+.osb-app ::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
+
+/* ── RESPONSIVE ── */
+@media (max-width: 1024px) {
+  .osb-app .note-pane { width: 260px; padding: 16px 18px; }
+  .osb-app .sidebar { width: 180px; }
+  .osb-app .search { width: 200px; }
+  .osb-app .bottom-panel { height: 300px; }
+}
+@media (max-width: 768px) {
+  .osb-app .main-area { flex-direction: column; }
+  .osb-app .sidebar { width: 100%; max-height: 160px; border-right: 0; border-bottom: 1px solid var(--border); }
+  .osb-app .workspace-top { flex-direction: column; }
+  .osb-app .note-pane { width: 100%; max-height: 250px; border-right: 0; border-bottom: 1px solid var(--border); }
+  .osb-app .graph-pane { min-height: 250px; }
+  .osb-app .bottom-panel { height: 240px; }
+  .osb-app .search { width: 140px; }
+  .osb-app .header-left { gap: 8px; }
+  .osb-app .logo { font-size: 11px; }
+}
+
+/* ── Second Brain v3 product workspace ── */
+/* Hide only the Hermes route banner whose sibling main mounts this plugin. */
+body:has(.osb-app) header[role="banner"]:has(~ main .osb-app){display:none!important}
+body:has(.osb-app){display:grid!important;grid-template-rows:minmax(0,1fr)!important}
+body:has(.osb-app) #root{height:auto!important;min-height:0!important;max-height:100%!important;overflow:hidden!important}
+body:has(.osb-app) #root>div:has(.osb-app){height:100%!important;max-height:100%!important;min-height:0!important}
+body:has(.osb-app) main:has(.osb-app){overflow-y:hidden!important}
+body:has(.osb-app) main:has(.osb-app)>div:has(.osb-app){min-height:0!important}
+body:has(.osb-app) main:has(.osb-app)>div:has(.osb-app)>div:has(.osb-app){display:flex!important;flex:1 1 auto!important;min-height:0!important;height:auto!important;padding-bottom:0!important}
+body:has(.osb-app) .osb-app{height:auto;min-height:0;flex:1 1 auto}
+#osbStandaloneRoot{height:100dvh;min-height:0;overflow:hidden;display:flex}
+#osbStandaloneRoot>.osb-app{height:100%;min-height:0;flex:1 1 auto}
+.osb-app button, .osb-app input, .osb-app select{font:inherit}.osb-app button{color:inherit}
+.osb-app button:focus-visible, .osb-app input:focus-visible, .osb-app select:focus-visible, .osb-app a:focus-visible{outline:2px solid var(--accent-blue);outline-offset:2px}
+.osb-app .sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}
+.osb-app{--note-width:340px;--activity-height:300px;position:relative;min-width:0}.osb-app header{height:46px;padding:0 12px;gap:12px}
+.osb-app .ui-icon{display:block;flex:none}.osb-app .logo-mark{color:var(--accent-purple);display:inline-flex;align-items:center}.osb-app .top-icon, .osb-app .freshness, .osb-app .pane-action, .osb-app .toolbar-btn, .osb-app .icon-action{border:1px solid var(--border);background:var(--bg-main);border-radius:4px;cursor:pointer}.osb-app .top-icon{width:28px;height:28px;padding:0;display:inline-flex;align-items:center;justify-content:center}
+.osb-app .search-wrap{position:relative;flex:0 1 480px;z-index:80}.osb-app .search{width:100%;max-width:none;border-radius:4px;height:30px;padding:5px 10px}
+.osb-app .command-palette{display:none;position:absolute;top:34px;left:0;right:0;max-height:340px;overflow:auto;background:#111820;border:1px solid var(--border);border-radius:4px;box-shadow:0 18px 48px rgba(0,0,0,.48);padding:4px}.osb-app .command-palette.open{display:block}
+.osb-app .palette-item{width:100%;border:0;background:transparent;border-radius:4px;padding:8px;display:grid;grid-template-columns:84px 1fr;gap:8px;text-align:left;cursor:pointer}.osb-app .palette-item:hover, .osb-app .palette-item.active{background:var(--bg-hover);color:#fff}.osb-app .palette-type{color:var(--accent-purple);font:500 9px ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;text-transform:uppercase}.osb-app .palette-empty{padding:16px;color:var(--text-dim);text-align:center}
+.osb-app .freshness{padding:5px 8px;font:500 10px ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;white-space:nowrap}.osb-app .stale-banner{flex:none;padding:6px 12px;color:#ffd2cc;background:rgba(255,123,114,.1);border-bottom:1px solid rgba(255,123,114,.3);font-size:12px}.osb-app .stale-banner button{border:0;background:none;color:#fff;text-decoration:underline;cursor:pointer}
+.osb-app .preset-bar{min-height:34px;flex:none;display:flex;align-items:center;gap:4px;padding:4px 10px;overflow-x:auto;border-bottom:1px solid var(--border);background:#10151c;scrollbar-width:thin}.osb-app .preset-btn, .osb-app .active-area-chip{flex:none;border:1px solid var(--border);background:var(--bg-main);color:var(--text-muted);border-radius:4px;padding:3px 7px;font:500 10px ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;cursor:pointer}.osb-app .preset-btn:hover, .osb-app .preset-btn.active, .osb-app .active-area-chip{color:var(--accent-blue);border-color:var(--accent-blue);background:rgba(88,166,255,.08)}.osb-app .ghost-count{margin-left:auto;flex:none;color:var(--text-dim);font:500 9px ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace}
+.osb-app .main-area{min-height:0}.osb-app .sidebar{width:230px;padding:10px;transition:width .18s ease,padding .18s ease}.osb-app .pane-head{min-height:26px;display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;color:var(--text-dim);font:600 10px ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace}.osb-app .pane-action{width:24px;height:22px;padding:0;display:inline-flex;align-items:center;justify-content:center}.osb-app .pane-action-label{width:auto;padding:0 7px;gap:4px;font:500 9px ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace}
+.osb-app .sort-label{display:flex;align-items:center;justify-content:space-between;gap:8px;color:var(--text-dim);font:500 10px ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;margin-bottom:8px}.osb-app .sort-label select, .osb-app .compact-select{min-width:90px;background:var(--bg-main);color:var(--text-muted);border:1px solid var(--border);border-radius:4px;padding:3px 5px;font-size:10px}
+.osb-app .folder-row{display:flex;align-items:center;gap:2px}.osb-app .folder-arrow{flex:none;width:22px;height:25px;border:0;background:transparent;color:var(--text-dim);cursor:pointer;border-radius:4px}.osb-app .folder-label{flex:1;min-width:0;border:0;background:transparent;color:var(--text-main);display:flex;align-items:center;gap:6px;padding:5px 6px;border-radius:4px;cursor:pointer;text-align:left}.osb-app .folder-label:hover, .osb-app .folder-label.active{background:var(--bg-hover);color:var(--accent-blue)}.osb-app .file-item.child{width:100%;border:0;background:transparent;text-align:left}.osb-app .explorer-progress{color:var(--text-dim);font:500 9px ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;padding:4px 8px 2px}.osb-app .show-more{width:100%;border:1px dashed var(--border);background:transparent;color:var(--accent-blue);border-radius:4px;padding:4px;font-size:10px;cursor:pointer}.osb-app .sidebar-section{margin-top:12px}
+.osb-app .filter-empty{border:1px solid var(--border);background:var(--bg-main);border-radius:4px;padding:10px;margin:8px 0}.osb-app .filter-empty strong{font-size:12px}.osb-app .filter-empty p{color:var(--text-dim);font-size:10px;margin:4px 0 8px}.osb-app .filter-empty button{border:1px solid var(--accent-blue);background:rgba(88,166,255,.08);color:var(--accent-blue);border-radius:4px;padding:4px 7px;cursor:pointer}
+.osb-app .stat-item, .osb-app .properties-block, .osb-app .note-preview-text, .osb-app .bp-pre, .osb-app .bp-log-card, .osb-app .bp-art-card, .osb-app .bp-vault-card, .osb-app .backlink-item, .osb-app .graph-controls, .osb-app .graph-info{border-radius:4px}.osb-app .workspace{min-width:0;min-height:0}.osb-app .workspace-top{min-width:0}.osb-app .note-pane{width:var(--note-width);padding:12px 14px;min-width:260px}
+.osb-app .inspector-toolbar{display:flex;align-items:center;gap:6px;margin-bottom:9px}.osb-app .segmented{display:flex;flex:1;border:1px solid var(--border);border-radius:4px;overflow:hidden}.osb-app .segmented button{flex:1;border:0;border-right:1px solid var(--border);background:transparent;color:var(--text-dim);padding:4px;font-size:10px;cursor:pointer}.osb-app .segmented button:last-child{border-right:0}.osb-app .segmented button.active{color:var(--accent-blue);background:rgba(88,166,255,.08)}.osb-app .icon-action{height:25px;padding:0 6px;font:600 9px ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace}.osb-app .copy-status{color:var(--accent-green);font:500 10px ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;margin-bottom:6px}.osb-app .note-title{font-size:22px!important;font-weight:590!important;line-height:1.2!important;letter-spacing:-.02em!important;margin:4px 0 10px}
+.osb-app .icon-action{width:26px;padding:0;display:inline-flex;align-items:center;justify-content:center}
+.osb-app .properties-block{padding:9px;margin-bottom:10px}.osb-app .prop-row{align-items:flex-start;font-size:11px}.osb-app .prop-key{min-width:65px}.osb-app .note-content{flex:0 0 auto}.osb-app .markdown-rendered{color:var(--text-muted);font-size:12px;line-height:1.55;padding:10px;border:1px solid var(--border-light);background:rgba(0,0,0,.18);border-radius:4px}.osb-app .markdown-rendered h1{color:var(--text-main);font-size:15px!important;font-weight:590!important;line-height:1.3!important;letter-spacing:-.01em!important;margin:8px 0 4px}.osb-app .markdown-rendered h2{color:var(--text-main);font-size:13px!important;font-weight:590!important;line-height:1.35!important;letter-spacing:0!important;margin:7px 0 3px}.osb-app .markdown-rendered h3, .osb-app .markdown-rendered h4{color:var(--text-main);font-size:12px!important;font-weight:510!important;line-height:1.4!important;letter-spacing:0!important;margin:6px 0 3px}.osb-app .markdown-rendered p{margin:0 0 7px}.osb-app .markdown-rendered ul{padding-left:18px;margin:0 0 8px}.osb-app .markdown-rendered blockquote{border-left:2px solid var(--accent-purple);padding-left:8px;color:#b6bec8}.osb-app .obsidian-action{display:inline-block;margin-top:8px;color:var(--accent-blue);font-size:11px}.osb-app .backlink-item{width:100%;text-align:left}.osb-app .outside-badge{flex:none;color:var(--accent-orange);font:500 8px ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;border:1px solid rgba(227,179,65,.35);padding:2px 4px;border-radius:4px}
+.osb-app .splitter{flex:none;position:relative;z-index:20;background:var(--border-light);touch-action:none}.osb-app .splitter:hover{background:var(--accent-blue)}.osb-app .splitter-vertical{width:4px;cursor:col-resize}.osb-app .splitter-horizontal{height:4px;cursor:row-resize}.osb-app .graph-surface{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;position:relative;container-type:inline-size}.osb-app .graph-toolbar{flex:none;min-height:34px;display:flex;align-items:center;gap:6px;justify-content:space-between;padding:4px 8px;border-bottom:1px solid var(--border);background:#10151c}
+.osb-app .focus-switch{display:flex;border:1px solid var(--border);border-radius:4px;overflow:hidden}.osb-app .focus-switch button, .osb-app .toolbar-btn{border:0;border-right:1px solid var(--border);background:transparent;color:var(--text-muted);padding:4px 7px;font:500 9px ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;cursor:pointer}.osb-app .focus-switch button{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}.osb-app .focus-switch button:last-child{border-right:0}.osb-app .focus-switch button.active{color:var(--accent-blue);background:rgba(88,166,255,.08)}.osb-app .focus-switch button:disabled{opacity:.35;cursor:not-allowed}.osb-app .focus-count{min-width:18px;padding:1px 4px;border-radius:3px;background:rgba(255,255,255,.06);color:var(--text-dim);font-size:8px;text-align:center}.osb-app .focus-switch button.active .focus-count{background:rgba(88,166,255,.14);color:var(--accent-blue)}.osb-app .toolbar-actions{display:flex;align-items:center;justify-content:flex-end;gap:4px}.osb-app .toolbar-btn{border:1px solid var(--border);border-radius:4px;white-space:nowrap;display:inline-flex;align-items:center;justify-content:center;gap:4px}.osb-app .toolbar-btn:hover{color:var(--text-main);border-color:var(--text-dim);background:rgba(255,255,255,.035)}.osb-app .graph-pane{min-width:0;min-height:0}.osb-app .graph-list{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}.osb-app .graph-list:focus-within{clip:auto;width:260px;height:220px;overflow:auto;left:8px;top:42px;z-index:50;background:var(--bg-panel);border:1px solid var(--border);padding:6px}.osb-app .graph-list button{display:block;width:100%;border:0;background:transparent;color:var(--text-main);text-align:left;padding:4px}
+.osb-app .bottom-panel{height:min(var(--activity-height),45%);min-height:0}.osb-app .bp-head{display:flex;align-items:center;border-bottom:1px solid var(--border)}.osb-app .bp-tabs{flex:1;border-bottom:0;overflow-x:auto}.osb-app .timeline-filters{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:5px 10px;border-bottom:1px solid var(--border-light)}.osb-app .timeline-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:6px}.osb-app .timeline-card{border:1px solid var(--border-light);background:var(--bg-main);border-radius:4px;padding:8px;color:var(--text-main);display:flex;align-items:flex-start;gap:7px;text-align:left}.osb-app .timeline-card:not(:disabled){cursor:pointer}.osb-app .timeline-card:not(:disabled):hover{border-color:var(--accent-blue)}.osb-app .timeline-card:disabled{opacity:.72}.osb-app .event-mark{width:7px;height:7px;border-radius:50%;background:var(--accent-blue);margin-top:4px;flex:none}.osb-app .kind-preference .event-mark{background:var(--accent-purple)}.osb-app .kind-signal .event-mark{background:var(--accent-green)}.osb-app .kind-log .event-mark{background:#7a7fad}.osb-app .kind-created .event-mark{background:var(--accent-orange)}.osb-app .event-body{flex:1;display:flex;flex-direction:column;gap:2px;min-width:0}.osb-app .bp-art-card, .osb-app .bp-vault-card{text-align:left}.osb-app .dataset-cap{margin-top:8px;color:var(--text-dim);font:500 9px ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace}
+.osb-app .views-drawer{display:none;position:absolute;right:12px;bottom:30px;width:290px;max-height:230px;overflow:auto;z-index:60;background:rgba(17,24,32,.96);border:1px solid var(--border);border-radius:4px;padding:8px;box-shadow:0 12px 32px rgba(0,0,0,.35)}.osb-app .views-drawer.open{display:block}.osb-app .views-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;font-size:11px}.osb-app .views-head button, .osb-app .built-in-views button, .osb-app .save-view button, .osb-app .saved-view-row button{border:1px solid var(--border);background:var(--bg-main);color:var(--text-muted);border-radius:4px;padding:3px 5px;font-size:9px;cursor:pointer}.osb-app .built-in-views{display:flex;flex-wrap:wrap;gap:3px}.osb-app .save-view{display:flex;gap:4px;margin-top:6px}.osb-app .save-view input{flex:1;min-width:0;border:1px solid var(--border);background:var(--bg-main);color:var(--text-main);border-radius:4px;padding:4px 6px;font-size:10px}.osb-app .saved-view-row{display:flex;gap:4px;margin-top:4px}.osb-app .saved-view-row button:first-child{flex:1;text-align:left}.osb-app .cluster-summary{font-size:10px;line-height:1.4;color:var(--text-main);margin-top:6px;padding:6px;background:var(--bg-main);border:1px solid var(--border-light);border-radius:4px}.osb-app .views-drawer small{display:block;color:var(--text-dim);font-size:8px;margin-top:5px}.osb-app .mobile-modes{display:none}
+.osb-app .dimension-switch{display:flex;flex:none;border:1px solid var(--border);border-radius:4px;overflow:hidden;background:rgba(0,0,0,.16)}.osb-app .dimension-switch button{min-width:30px;height:23px;border:0;border-right:1px solid var(--border);background:transparent;color:var(--text-dim);font:600 9px ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;letter-spacing:.04em;cursor:pointer}.osb-app .dimension-switch button:last-child{border-right:0}.osb-app .dimension-switch button:hover{color:var(--text-main);background:rgba(255,255,255,.035)}.osb-app .dimension-switch button.active{color:#d7efff;background:linear-gradient(180deg,rgba(88,166,255,.18),rgba(88,166,255,.07));box-shadow:inset 0 0 0 1px rgba(88,166,255,.28)}
+.osb-app .graph-pane-3d{background:#060910;isolation:isolate}.osb-app #graphCanvas3D{position:absolute;inset:0;width:100%;height:100%;display:block;cursor:grab;touch-action:none}.osb-app #graphCanvas3D:active{cursor:grabbing}.osb-app .graph-dimension-badge{position:absolute;top:9px;left:10px;z-index:9;padding:4px 7px;border:1px solid rgba(88,166,255,.22);border-radius:4px;background:rgba(7,12,20,.72);backdrop-filter:blur(8px);color:#87a6c7;font:500 8px ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;letter-spacing:.035em;pointer-events:none}.osb-app .graph-pane-3d .graph-info{border-color:rgba(88,166,255,.22);background:rgba(7,12,20,.76)}.osb-app .graph-pane-3d .orbit-control{color:var(--accent-cyan)}
+@container (max-width:650px){.osb-app .toolbar-btn{width:26px;height:24px;padding:0}.osb-app .toolbar-btn .toolbar-label{display:none}.osb-app .graph-toolbar{gap:4px;padding-inline:5px}.osb-app .focus-switch button{padding-inline:5px}}
+.osb-app.explorer-collapsed .sidebar{width:0;min-width:0;padding:0;border:0;overflow:hidden}.osb-app.inspector-collapsed .note-pane{width:0;min-width:0;padding:0;border:0;overflow:hidden}.osb-app.inspector-collapsed .splitter-vertical{display:none}.osb-app.activity-collapsed .bottom-panel, .osb-app.activity-collapsed .splitter-horizontal{display:none}.osb-app.graph-maximized .sidebar, .osb-app.graph-maximized .note-pane, .osb-app.graph-maximized .splitter, .osb-app.graph-maximized .bottom-panel{display:none}.osb-app.graph-maximized .views-drawer{display:none}.osb-app .status-bar{min-height:24px}
+@media(max-width:1024px) and (min-width:769px){.osb-app .sidebar{width:190px}.osb-app .note-pane{min-width:240px;width:min(var(--note-width),280px);padding:10px}.osb-app .views-drawer{width:250px;max-height:190px}.osb-app .preset-btn{padding:3px 5px}}
+@media(max-width:768px){
+ .osb-app{width:100%;max-width:100%;height:auto;min-height:0;overflow:hidden}.osb-app header{height:42px;padding:0 7px}.osb-app .header-left{gap:4px}.osb-app .top-icon{display:none}.osb-app .logo{font-size:10px}.osb-app .header-right .ver{display:none}.osb-app .freshness{font-size:9px;padding:5px}.osb-app .search-wrap{flex:1;min-width:0}.osb-app .search{height:28px;font-size:11px}.osb-app .command-palette{position:fixed;top:42px;left:6px;right:6px;max-height:52vh}
+ .osb-app .preset-bar{min-height:30px;padding:3px 6px}.osb-app .preset-btn{font-size:9px}.osb-app .ghost-count{display:none}.osb-app .mobile-modes{display:grid;grid-template-columns:repeat(4,1fr);flex:none;height:36px;padding:3px 5px;gap:3px;background:var(--bg-panel);border-bottom:1px solid var(--border)}.osb-app .mobile-modes button{border:1px solid var(--border);background:var(--bg-main);color:var(--text-muted);border-radius:4px;font:500 10px ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace}.osb-app .mobile-modes button.active{color:var(--accent-blue);border-color:var(--accent-blue);background:rgba(88,166,255,.08)}
+ .osb-app .main-area{flex:1;min-height:0;display:flex;flex-direction:row;overflow:hidden}.osb-app .sidebar, .osb-app .note-pane, .osb-app .graph-surface, .osb-app .bottom-panel{display:none!important}.osb-app .workspace{flex:1;width:100%;min-height:0}.osb-app .workspace-top{flex:1;min-height:0;display:flex;flex-direction:row}.osb-app .splitter{display:none!important}.osb-app .views-drawer{position:fixed;left:6px;right:6px;bottom:26px;width:auto;max-height:52vh}.osb-app .views-drawer.open{display:block!important}.osb-app.mode-vault .main-area{position:relative}.osb-app.mode-vault .sidebar{display:block!important;position:absolute;inset:0;width:100%;height:auto;max-height:none;min-height:0;overflow-y:auto;border:0;padding:9px}.osb-app.mode-vault .workspace{display:none}.osb-app.mode-note .note-pane{display:flex!important;width:100%;min-width:0;max-height:none;border:0;padding:10px 12px}.osb-app.mode-note .graph-surface{display:none!important}.osb-app.mode-graph .graph-surface{display:flex!important;width:100%;min-width:0;min-height:0}.osb-app.mode-graph .note-pane{display:none!important}.osb-app.mode-activity .workspace{height:100%;max-height:100%;flex:1 1 0;min-height:0;overflow:hidden}.osb-app.mode-activity .workspace-top{display:none}.osb-app.mode-activity .bottom-panel{display:flex!important;height:100%;max-height:100%;flex:1 1 0!important;min-height:0;overflow:hidden;border-top:0}.osb-app.mode-activity .bp-content{min-height:0;overflow-y:auto}
+ .osb-app .graph-toolbar{min-height:32px;padding:3px 5px;overflow-x:auto}.osb-app .toolbar-btn{display:none}.osb-app .focus-switch{flex:none}.osb-app .graph-pane{flex:1;min-height:250px}.osb-app .graph-controls{top:8px;right:8px}.osb-app .graph-info{bottom:8px;left:8px;right:8px;gap:7px;padding:5px 7px}.osb-app .note-pane .pane-head, .osb-app .sidebar .pane-action, .osb-app .bottom-panel .pane-action{display:none}.osb-app .bp-tabs{overflow-x:auto;padding:0 4px}.osb-app .bp-tab{flex:none;padding:7px 8px;font-size:10px}.osb-app .timeline-filters{padding:4px 6px}.osb-app .timeline-list{grid-template-columns:1fr}.osb-app .bp-content{padding:7px}.osb-app .status-bar{height:22px;min-height:22px;padding:0 6px;font-size:9px}.osb-app .status-left span:nth-child(2), .osb-app .status-left span:nth-child(4), .osb-app .status-right{display:none}.osb-app .note-preview-text{max-height:none}.osb-app .note-content{flex:0 0 auto}.osb-app .backlinks-section{padding-bottom:12px}
+}
+@media(prefers-reduced-motion:reduce){.osb-app, .osb-app *, .osb-app *::before, .osb-app *::after{scroll-behavior:auto!important;animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}

@@ -1,0 +1,8 @@
+name: hermes-osb-panel
+version: "3.1.0"
+description: "Read-only independent community companion for Hermes Agent and Open Second Brain snapshots."
+author: "Filipe Bezerra (@lipebez)"
+license: MIT
+kind: dashboard
+provides_tools: []
+provides_hooks: []

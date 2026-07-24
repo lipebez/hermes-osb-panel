@@ -1,0 +1,22 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+.hermes/
+qa-output/
+**/report.json
+**/second-brain-*.png
+.env
+.env.*
+
+# Local credential overlays and development configuration
+local-webui.env
+*.local.env
+
+# Local environments, dependency trees, and static-analysis output
+.venv/
+venv/
+node_modules/
+.coverage
+.mypy_cache/
+.ruff_cache/

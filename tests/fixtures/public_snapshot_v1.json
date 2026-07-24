@@ -1,0 +1,228 @@
+{
+  "schema": "open-second-brain.dashboard.snapshot.v1",
+  "generated_at": "2026-01-15T12:00:00+00:00",
+  "revision": "synthetic-public-v1",
+  "provider": {
+    "name": "open-second-brain",
+    "available": true,
+    "health": "ok",
+    "semantic": "indexed",
+    "mode": "normalized"
+  },
+  "nodes": [
+    {
+      "id": "Brain/active.md",
+      "label": "Active context",
+      "kind": "active",
+      "layer": "brain",
+      "area": "brain",
+      "preview": "# Active context\n\nPrepare the portable dashboard boundary and preserve accessible graph navigation.",
+      "modified_at": "2026-01-15T11:45:00+00:00",
+      "metadata": {}
+    },
+    {
+      "id": "notes/architecture.md",
+      "label": "Architecture boundary",
+      "kind": "note",
+      "layer": "vault",
+      "area": "projects",
+      "preview": "# Architecture boundary\n\nThe UI consumes one versioned snapshot and does not import provider internals.",
+      "modified_at": "2026-01-15T11:30:00+00:00",
+      "metadata": {}
+    },
+    {
+      "id": "notes/dataset.md",
+      "label": "Synthetic dataset",
+      "kind": "note",
+      "layer": "vault",
+      "area": "references",
+      "preview": "# Synthetic dataset\n\nShareable visual QA uses generic records created only for testing.",
+      "modified_at": "2026-01-15T11:20:00+00:00",
+      "metadata": {}
+    },
+    {
+      "id": "notes/privacy.md",
+      "label": "Privacy model",
+      "kind": "preference",
+      "layer": "brain",
+      "area": "brain",
+      "preview": "# Privacy model\n\nLocal content stays authenticated. Public captures use the demo fixture.",
+      "modified_at": "2026-01-15T11:10:00+00:00",
+      "metadata": {}
+    },
+    {
+      "id": "notes/qa.md",
+      "label": "Visual QA matrix",
+      "kind": "note",
+      "layer": "vault",
+      "area": "runbooks",
+      "preview": "# Visual QA matrix\n\nExercise 2D and optional 3D at desktop, compact and mobile viewports.",
+      "modified_at": "2026-01-15T11:00:00+00:00",
+      "metadata": {}
+    },
+    {
+      "id": "notes/reader.md",
+      "label": "Prototype reader",
+      "kind": "note",
+      "layer": "vault",
+      "area": "decisions",
+      "preview": "# Prototype reader\n\nDirect Markdown traversal is isolated and is not the production OSB adapter.",
+      "modified_at": "2026-01-15T10:50:00+00:00",
+      "metadata": {}
+    },
+    {
+      "id": "notes/release.md",
+      "label": "Contribution package",
+      "kind": "note",
+      "layer": "vault",
+      "area": "projects",
+      "preview": "# Contribution package\n\nDocumentation, provenance, license and privacy gates are reviewed together.",
+      "modified_at": "2026-01-15T10:40:00+00:00",
+      "metadata": {}
+    },
+    {
+      "id": "notes/renderers.md",
+      "label": "Shared graph semantics",
+      "kind": "note",
+      "layer": "vault",
+      "area": "references",
+      "preview": "# Shared graph semantics\n\nThe 2D and 3D renderers share nodes, edges, selection and keyboard navigation.",
+      "modified_at": "2026-01-15T10:30:00+00:00",
+      "metadata": {}
+    },
+    {
+      "id": "notes/security.md",
+      "label": "Security checks",
+      "kind": "signal",
+      "layer": "brain",
+      "area": "brain",
+      "preview": "# Security checks\n\nReject private paths and redact secret-like values before browser delivery.",
+      "modified_at": "2026-01-15T10:20:00+00:00",
+      "metadata": {}
+    }
+  ],
+  "edges": [
+    {"source": "Brain/active.md", "target": "notes/architecture.md", "kind": "surface"},
+    {"source": "Brain/active.md", "target": "notes/privacy.md", "kind": "surface"},
+    {"source": "Brain/active.md", "target": "notes/qa.md", "kind": "surface"},
+    {"source": "notes/architecture.md", "target": "notes/reader.md", "kind": "related"},
+    {"source": "notes/architecture.md", "target": "notes/renderers.md", "kind": "related"},
+    {"source": "notes/dataset.md", "target": "notes/privacy.md", "kind": "related"},
+    {"source": "notes/privacy.md", "target": "notes/security.md", "kind": "related"},
+    {"source": "notes/qa.md", "target": "notes/dataset.md", "kind": "related"},
+    {"source": "notes/release.md", "target": "notes/architecture.md", "kind": "related"},
+    {"source": "notes/release.md", "target": "notes/qa.md", "kind": "related"},
+    {"source": "notes/renderers.md", "target": "notes/qa.md", "kind": "related"}
+  ],
+  "summaries": {
+    "counts": {
+      "preferences": 1,
+      "inbox": 1,
+      "retired": 0,
+      "logs": 2,
+      "brain_nodes": 3,
+      "vault_notes": 6,
+      "hermes_memory": 0,
+      "hermes_user": 0,
+      "hermes_notes": 0
+    },
+    "graph": {
+      "hub_ids": ["Brain/active.md", "notes/architecture.md", "notes/qa.md"],
+      "orphan_ids": [],
+      "broken_count": 0
+    }
+  },
+  "limits": {
+    "brain_files": {"shown": 3, "total": 3, "truncated": false},
+    "vault_files": {"shown": 6, "total": 6, "truncated": false},
+    "artifacts": {"shown": 3, "total": 3, "truncated": false},
+    "vault_notes": {"shown": 6, "total": 6, "truncated": false}
+  },
+  "activity": {
+    "active_preview": "# Active context\n\nPrepare the portable dashboard boundary and preserve accessible graph navigation.",
+    "recent": [
+      {"timestamp": "2026-01-15T11:50:00+00:00", "time": "11:50", "kind": "review", "text": "Snapshot contract reviewed", "agent": "demo-agent"},
+      {"timestamp": "2026-01-15T11:40:00+00:00", "time": "11:40", "kind": "qa", "text": "Viewport matrix prepared", "agent": "demo-agent"}
+    ],
+    "timeline": [
+      {"timestamp": "2026-01-15T11:50:00+00:00", "time": "11:50", "kind": "review", "text": "Snapshot contract reviewed", "agent": "demo-agent"},
+      {"timestamp": "2026-01-15T11:40:00+00:00", "time": "11:40", "kind": "qa", "text": "Viewport matrix prepared", "agent": "demo-agent"}
+    ]
+  },
+  "metrics": {
+    "records": [
+      {
+        "schema": "o2b.metrics.v1",
+        "surface": "index",
+        "run_at": "2026-01-15T11:30:00Z",
+        "payload": {"added": 2, "updated": 3, "deleted": 0, "alias_resolved": 1, "relation_violations": 0, "tier_drift": 0}
+      }
+    ]
+  },
+  "capabilities": {"graph_3d": true},
+  "counts": {
+    "preferences": 1,
+    "inbox": 1,
+    "retired": 0,
+    "logs": 2,
+    "brain_nodes": 3,
+    "vault_notes": 6,
+    "hermes_memory": 0,
+    "hermes_user": 0,
+    "hermes_notes": 0
+  },
+  "graph": {
+    "nodes": [
+      {"id": "Brain/active.md", "label": "Active context", "kind": "active", "layer": "brain", "area": "brain", "preview": "# Active context\n\nPrepare the portable dashboard boundary and preserve accessible graph navigation.", "modified_at": "2026-01-15T11:45:00+00:00", "metadata": {}},
+      {"id": "notes/architecture.md", "label": "Architecture boundary", "kind": "note", "layer": "vault", "area": "projects", "preview": "# Architecture boundary\n\nThe UI consumes one versioned snapshot and does not import provider internals.", "modified_at": "2026-01-15T11:30:00+00:00", "metadata": {}},
+      {"id": "notes/dataset.md", "label": "Synthetic dataset", "kind": "note", "layer": "vault", "area": "references", "preview": "# Synthetic dataset\n\nShareable visual QA uses generic records created only for testing.", "modified_at": "2026-01-15T11:20:00+00:00", "metadata": {}},
+      {"id": "notes/privacy.md", "label": "Privacy model", "kind": "preference", "layer": "brain", "area": "brain", "preview": "# Privacy model\n\nLocal content stays authenticated. Public captures use the demo fixture.", "modified_at": "2026-01-15T11:10:00+00:00", "metadata": {}},
+      {"id": "notes/qa.md", "label": "Visual QA matrix", "kind": "note", "layer": "vault", "area": "runbooks", "preview": "# Visual QA matrix\n\nExercise 2D and optional 3D at desktop, compact and mobile viewports.", "modified_at": "2026-01-15T11:00:00+00:00", "metadata": {}},
+      {"id": "notes/reader.md", "label": "Prototype reader", "kind": "note", "layer": "vault", "area": "decisions", "preview": "# Prototype reader\n\nDirect Markdown traversal is isolated and is not the production OSB adapter.", "modified_at": "2026-01-15T10:50:00+00:00", "metadata": {}},
+      {"id": "notes/release.md", "label": "Contribution package", "kind": "note", "layer": "vault", "area": "projects", "preview": "# Contribution package\n\nDocumentation, provenance, license and privacy gates are reviewed together.", "modified_at": "2026-01-15T10:40:00+00:00", "metadata": {}},
+      {"id": "notes/renderers.md", "label": "Shared graph semantics", "kind": "note", "layer": "vault", "area": "references", "preview": "# Shared graph semantics\n\nThe 2D and 3D renderers share nodes, edges, selection and keyboard navigation.", "modified_at": "2026-01-15T10:30:00+00:00", "metadata": {}},
+      {"id": "notes/security.md", "label": "Security checks", "kind": "signal", "layer": "brain", "area": "brain", "preview": "# Security checks\n\nReject private paths and redact secret-like values before browser delivery.", "modified_at": "2026-01-15T10:20:00+00:00", "metadata": {}}
+    ],
+    "edges": [
+      {"source": "Brain/active.md", "target": "notes/architecture.md", "kind": "surface"},
+      {"source": "Brain/active.md", "target": "notes/privacy.md", "kind": "surface"},
+      {"source": "Brain/active.md", "target": "notes/qa.md", "kind": "surface"},
+      {"source": "notes/architecture.md", "target": "notes/reader.md", "kind": "related"},
+      {"source": "notes/architecture.md", "target": "notes/renderers.md", "kind": "related"},
+      {"source": "notes/dataset.md", "target": "notes/privacy.md", "kind": "related"},
+      {"source": "notes/privacy.md", "target": "notes/security.md", "kind": "related"},
+      {"source": "notes/qa.md", "target": "notes/dataset.md", "kind": "related"},
+      {"source": "notes/release.md", "target": "notes/architecture.md", "kind": "related"},
+      {"source": "notes/release.md", "target": "notes/qa.md", "kind": "related"},
+      {"source": "notes/renderers.md", "target": "notes/qa.md", "kind": "related"}
+    ]
+  },
+  "graph_summary": {
+    "hub_ids": ["Brain/active.md", "notes/architecture.md", "notes/qa.md"],
+    "orphan_ids": [],
+    "broken_count": 0
+  },
+  "broken_links": [],
+  "active_preview": "# Active context\n\nPrepare the portable dashboard boundary and preserve accessible graph navigation.",
+  "recent_logs": [
+    {"timestamp": "2026-01-15T11:50:00+00:00", "time": "11:50", "kind": "review", "text": "Snapshot contract reviewed", "agent": "demo-agent"},
+    {"timestamp": "2026-01-15T11:40:00+00:00", "time": "11:40", "kind": "qa", "text": "Viewport matrix prepared", "agent": "demo-agent"}
+  ],
+  "timeline_events": [
+    {"timestamp": "2026-01-15T11:50:00+00:00", "time": "11:50", "kind": "review", "text": "Snapshot contract reviewed", "agent": "demo-agent"},
+    {"timestamp": "2026-01-15T11:40:00+00:00", "time": "11:40", "kind": "qa", "text": "Viewport matrix prepared", "agent": "demo-agent"}
+  ],
+  "artifacts": [
+    {"id": "Brain/active.md", "label": "Active context", "kind": "active", "preview": "Portable dashboard boundary"},
+    {"id": "notes/privacy.md", "label": "Privacy model", "kind": "preference", "preview": "Public captures use synthetic data"},
+    {"id": "notes/security.md", "label": "Security checks", "kind": "signal", "preview": "Redact private paths and secrets"}
+  ],
+  "vault_notes": [
+    {"id": "notes/architecture.md", "label": "Architecture boundary", "area": "projects", "preview": "One versioned UI snapshot"},
+    {"id": "notes/dataset.md", "label": "Synthetic dataset", "area": "references", "preview": "Generic records for testing"},
+    {"id": "notes/qa.md", "label": "Visual QA matrix", "area": "runbooks", "preview": "Desktop, compact and mobile"},
+    {"id": "notes/reader.md", "label": "Prototype reader", "area": "decisions", "preview": "Local prototype only"},
+    {"id": "notes/release.md", "label": "Contribution package", "area": "projects", "preview": "Documentation and provenance"},
+    {"id": "notes/renderers.md", "label": "Shared graph semantics", "area": "references", "preview": "2D and 3D share one model"}
+  ]
+}
