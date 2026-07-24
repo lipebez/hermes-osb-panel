@@ -7,6 +7,7 @@ All notable changes to Hermes OSB Panel will be documented in this file.
 ### Added
 
 - Public documentation for the independent-community status, read-only snapshot boundary, fail-closed direct-reader opt-in, privacy rules, manual QA, contribution guardrails, and vulnerability reporting process.
+- Ordered platform-specific direct-reader commands: PowerShell for Windows and Bash/Zsh for Linux/macOS, each with matching fail-closed disable/restart sequences.
 - Explicit documentation of the versioned companion contract `open-second-brain.dashboard.snapshot.v1` and the documented `o2b.metrics.v1` context.
 - Recorded private-staging validation: a Windows PowerShell clean-host install achieved discovery, the `/second-brain` default fail-closed no-data state, disable, and removal after a narrow ReadOnly recovery.
 - Added Windows-only removal-recovery documentation for `WinError 5` after disable: clear ReadOnly attributes only within the already-disabled plugin directory, then retry the official plugin removal command.

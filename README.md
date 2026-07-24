@@ -71,11 +71,39 @@ This narrow recovery does not delete files or target other plugins. Do not use i
 
 The default is fail-closed: without an explicitly supplied test reader or the local opt-in below, no vault is read. `FixtureSnapshotReader` is the supported reader for tests, demos, and shareable screenshots.
 
-`DirectMarkdownPrototypeReader` is a read-only local prototype. It reads only the vault named by `OPEN_SECOND_BRAIN_CONFIG` or `O2B_CONFIG` through its `vault` setting; it has no named fallback vault. Enable it only for one authenticated owner-controlled dashboard process:
+`DirectMarkdownPrototypeReader` is a read-only local prototype. It reads only the vault named by `OPEN_SECOND_BRAIN_CONFIG` or `O2B_CONFIG` through its `vault` setting; it has no named fallback vault. If neither variable is set, it uses the Open Second Brain default configuration path. Enable it only for one authenticated owner-controlled dashboard process.
+
+**Choose exactly one shell block below. Run its commands from top to bottom in the same terminal that starts the dashboard. Do not use `export` in Windows PowerShell.**
+
+### Windows PowerShell
+
+```powershell
+$env:HERMES_OSB_PANEL_ENABLE_DIRECT_MARKDOWN = 'true'
+hermes dashboard --stop
+hermes dashboard --no-open
+```
+
+The environment variable exists only in the current PowerShell window. Keep that window open while testing. To return the dashboard to its fail-closed default, run these commands in order:
+
+```powershell
+hermes dashboard --stop
+Remove-Item Env:\HERMES_OSB_PANEL_ENABLE_DIRECT_MARKDOWN -ErrorAction SilentlyContinue
+hermes dashboard --no-open
+```
+
+### Linux/macOS (Bash/Zsh)
 
 ```bash
 export HERMES_OSB_PANEL_ENABLE_DIRECT_MARKDOWN=true
 hermes dashboard --stop
+hermes dashboard --no-open
+```
+
+To return the dashboard to its fail-closed default, run these commands in order:
+
+```bash
+hermes dashboard --stop
+unset HERMES_OSB_PANEL_ENABLE_DIRECT_MARKDOWN
 hermes dashboard --no-open
 ```
 

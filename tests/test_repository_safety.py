@@ -216,6 +216,28 @@ class RepositorySafetyTests(unittest.TestCase):
         ):
             self.assertTrue((ROOT / relative).is_file(), relative)
 
+    def test_readme_lists_ordered_shell_specific_direct_reader_commands(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        expected_sequences = (
+            (
+                "### Windows PowerShell",
+                "$env:HERMES_OSB_PANEL_ENABLE_DIRECT_MARKDOWN = 'true'",
+                "hermes dashboard --stop",
+                "hermes dashboard --no-open",
+            ),
+            (
+                "Linux/macOS (Bash/Zsh)",
+                "export HERMES_OSB_PANEL_ENABLE_DIRECT_MARKDOWN=true",
+                "hermes dashboard --stop",
+                "hermes dashboard --no-open",
+            ),
+        )
+        for heading, *commands in expected_sequences:
+            with self.subTest(platform=heading):
+                start = readme.index(heading)
+                positions = [readme.index(command, start) for command in commands]
+                self.assertEqual(positions, sorted(positions))
+
 
 if __name__ == "__main__":
     unittest.main()
