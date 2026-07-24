@@ -22,7 +22,7 @@ The suite covers normalization, fail-closed reader selection, redaction, fixture
 
 ## Manual CDP matrix
 
-The dashboard host must already be running. The CDP harness does not install, start, or expose a host service. When host authentication is used, provide credentials only through an operator-controlled local environment mechanism; never print, save, or commit the password, cookie, or session token.
+The dashboard host must already be running. The CDP harness does not install, start, or expose a host service. Authenticated runs accept only strict `http`/`https` loopback URLs whose hostname is exactly `127.0.0.1`, `localhost`, or `::1`, without userinfo; this validation occurs before any authentication value is read. When host authentication is used, provide credentials only through an operator-controlled local environment mechanism; never print, save, or commit the password, cookie, or session token.
 
 ```bash
 HERMES_WEBUI_ENV_FILE=local-webui.env \

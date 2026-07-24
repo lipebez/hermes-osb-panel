@@ -2,7 +2,7 @@
 
 Hermes OSB Panel is a read-only dashboard companion for normalized Open Second Brain (OSB) snapshots in Hermes Agent. It is an independent community project by Filipe Bezerra (`@lipebez`): it is not an official Hermes Agent or Open Second Brain module and is not affiliated with, endorsed by, or maintained by either project.
 
-> **Pre-publication status.** Current release: `3.1.0` is local package metadata only; it is **unreleased** and not published or released. Private staging validation, including its archive gate, has passed, but private staging is not a public release. The intended repository `lipebez/hermes-osb-panel` does not exist yet, so the post-publication GitHub commands below remain instructional.
+> **Source and package status.** Current release: `3.1.0` is **unreleased** package metadata: no package artifact, tag, or GitHub Release is published. Private staging validation, including its archive gate, has passed, but private staging is not a public release. The intended public source path is `lipebez/hermes-osb-panel`; use the GitHub installation command below only after verifying that repository and commit are accessible. Source availability alone does not publish a package release.
 
 ## What it does
 
@@ -29,16 +29,16 @@ Before any future install, an operator needs:
 
 The panel does not add its own authentication layer and must not be exposed as a substitute for host authentication. Its direct reader is for a single-user, direct-reader setup only; it does **not** provide multi-user, multi-profile, team, or tenant isolation.
 
-## Future GitHub installation (post-publication only)
+## GitHub installation
 
-After publication of the intended repository, the expected Hermes CLI flow is:
+After verifying that the intended public repository is accessible, the expected Hermes CLI flow is:
 
 ```bash
 hermes plugins install lipebez/hermes-osb-panel --enable
 hermes dashboard --no-open
 ```
 
-These commands document the intended post-publication path using the current Hermes CLI form `hermes plugins install <Git URL or owner/repo> --enable`. Private staging validation passed, but do not run this public command until `lipebez/hermes-osb-panel` actually exists.
+These commands use the current Hermes CLI form `hermes plugins install <Git URL or owner/repo> --enable`. Private staging validation passed, but verify the public repository page and commit before installing from `lipebez/hermes-osb-panel`.
 
 To turn the plugin off later:
 

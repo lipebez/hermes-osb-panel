@@ -53,6 +53,24 @@ def parse_viewport(value: str) -> tuple[int, int]:
     return parsed
 
 
+def parse_loopback_url(value: str) -> str:
+    """Accept only authenticated-harness destinations on the local loopback."""
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+        parsed.port  # Validate malformed and out-of-range ports.
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("url must be a valid http(s) loopback URL") from exc
+    if (
+        parsed.scheme not in {"http", "https"}
+        or hostname not in {"127.0.0.1", "localhost", "::1"}
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise argparse.ArgumentTypeError("url must be an http(s) loopback URL without userinfo")
+    return value
+
+
 def free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -818,7 +836,7 @@ def run_viewport(cdp: CDP, url: str, out: Path, width: int, height: int) -> dict
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--url", required=True)
+    parser.add_argument("--url", required=True, type=parse_loopback_url)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--fixture", type=Path, help="serve this sanitized fixture with source assets for shareable demo QA")
     parser.add_argument("--viewport", dest="viewports", action="append", type=parse_viewport, help="repeatable WIDTHxHEIGHT; defaults to 1440x900, 1024x768 and 390x844")

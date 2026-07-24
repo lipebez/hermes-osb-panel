@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import argparse
 import json
 import re
 import subprocess
+import sys
 import tomllib
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts import qa_dashboard_cdp
 
@@ -265,6 +268,67 @@ class DashboardAssetTests(unittest.TestCase):
             self.assertIn(invariant, qa)
         self.assertIn("state_before,state_after,state_zoom,state_fit_all", qa)
         self.assertIn("requestAnimationFrame(()=>requestAnimationFrame(resolve))", qa)
+
+    def test_cdp_harness_allows_only_strict_loopback_urls(self):
+        http = "http" + "://"
+        https = "https" + "://"
+        accepted = (
+            http + "127.0.0.1" + ":8123/second-brain",
+            https + "localhost" + "/second-brain?" + "mode=qa",
+            http + "[" + "::1" + "]:9222/second-brain",
+        )
+        rejected = (
+            "ftp" + "://" + "localhost/second-brain",
+            http + "dashboard.example.test/second-brain",
+            http + "127.0.0.1.evil.test/second-brain",
+            http + "user" + "@localhost/second-brain",
+            https + "user" + ":" + "password" + "@127.0.0.1/second-brain",
+            "http:///second-brain",
+            http + "localhost:not-a-port/second-brain",
+        )
+
+        for url in accepted:
+            self.assertEqual(qa_dashboard_cdp.parse_loopback_url(url), url)
+        for url in rejected:
+            with self.subTest(url=url):
+                with self.assertRaises(argparse.ArgumentTypeError):
+                    qa_dashboard_cdp.parse_loopback_url(url)
+
+    def test_cdp_harness_rejects_external_url_before_output_or_credentials(self):
+        output = ROOT / "qa-cdp-rejected-output-must-not-exist"
+        credential_names = {
+            "HERMES_WEBUI_PASSWORD",
+            "HERMES_WEBUI_ENV_FILE",
+            "HERMES_DASHBOARD_SESSION_TOKEN",
+        }
+        credential_reads: list[str] = []
+        original_environ_get = qa_dashboard_cdp.os.environ.get
+
+        def reject_credential_read(key: str, default: str | None = None) -> str | None:
+            if key in credential_names:
+                credential_reads.append(key)
+                raise AssertionError("credentials must not be read")
+            return original_environ_get(key, default)
+
+        self.assertFalse(output.exists())
+        with (
+            patch.object(sys, "argv", ["qa_dashboard_cdp.py", "--url", "https://external.example.test/second-brain", "--output", str(output)]),
+            patch.object(Path, "mkdir", side_effect=AssertionError("output must not be created")) as mkdir,
+            patch.object(qa_dashboard_cdp.shutil, "which", side_effect=AssertionError("Chromium discovery must not run")) as chromium_which,
+            patch.object(qa_dashboard_cdp, "local_auth_cookie", side_effect=AssertionError("local auth must not run")) as local_auth,
+            patch.object(qa_dashboard_cdp.os.environ, "get", side_effect=reject_credential_read),
+            patch.object(qa_dashboard_cdp.subprocess, "Popen", side_effect=AssertionError("Chromium must not start")) as chromium_start,
+        ):
+            with self.assertRaises(SystemExit) as failure:
+                qa_dashboard_cdp.main()
+
+        self.assertEqual(failure.exception.code, 2)
+        self.assertFalse(output.exists())
+        self.assertEqual(credential_reads, [])
+        mkdir.assert_not_called()
+        chromium_which.assert_not_called()
+        local_auth.assert_not_called()
+        chromium_start.assert_not_called()
 
     def test_cdp_harness_accepts_dashboard_session_header_without_logging_it(self):
         qa = (ROOT / "scripts" / "qa_dashboard_cdp.py").read_text(encoding="utf-8")
