@@ -2,7 +2,7 @@
 
 Hermes OSB Panel is a read-only dashboard companion for normalized Open Second Brain (OSB) snapshots in Hermes Agent. It is an independent community project by Filipe Bezerra (`@lipebez`): it is not an official Hermes Agent or Open Second Brain module and is not affiliated with, endorsed by, or maintained by either project.
 
-> **Pre-publication status.** Current release: `3.1.0` is local package metadata only; it is **unreleased** and not published or released. The intended repository `lipebez/hermes-osb-panel` does not exist yet. The future GitHub installation path below is instructional only; it has not been tested, and a clean-host Git installation is pending the first authorized commit and staging test.
+> **Pre-publication status.** Current release: `3.1.0` is local package metadata only; it is **unreleased** and not published or released. Private staging validation, including its archive gate, has passed, but private staging is not a public release. The intended repository `lipebez/hermes-osb-panel` does not exist yet, so the post-publication GitHub commands below remain instructional.
 
 ## What it does
 
@@ -15,7 +15,7 @@ It does **not** index, mutate, delete, reconfigure, or create another memory sto
 
 ## Compatibility and status
 
-The Hermes development/dashboard behavior was validated against **Hermes Agent v0.19.0 (2026.7.20)** in local fixture QA. This is evidence for that local fixture setup only: no clean installation has been run and no compatibility claim is made for other Hermes versions, hosts, or dashboard configurations.
+The Hermes development/dashboard behavior was validated against **Hermes Agent v0.19.0 (2026.7.20)** in local fixture QA. One real Windows PowerShell clean-host installation from private staging also achieved plugin discovery, loaded `/second-brain` fail-closed with no local data, and completed disable/removal recovery. That staging result does not make a public-release claim or establish compatibility for other Hermes versions, hosts, or dashboard configurations.
 
 The companion owns the versioned snapshot contract `open-second-brain.dashboard.snapshot.v1`. The only OSB surface described here is the documented `o2b.metrics.v1` surface together with the documented graph-export context in [`docs/upstream-data-boundary.md`](docs/upstream-data-boundary.md). There is **no verified OSB release-version compatibility range** and no production OSB adapter. Missing data fails soft in the UI; it must not be filled by guessing or private-module access.
 
@@ -25,20 +25,20 @@ Before any future install, an operator needs:
 
 1. a Hermes Agent installation with the dashboard available and access already protected by the host's dashboard authentication;
 2. permission to install a community plugin from GitHub after this repository has been published;
-3. an OSB configuration only if using the strictly local prototype reader described below.
+3. an OSB configuration **only** when using the strictly local prototype reader described below. No OSB installation or configuration is needed for the default fail-closed validation.
 
 The panel does not add its own authentication layer and must not be exposed as a substitute for host authentication. Its direct reader is for a single-user, direct-reader setup only; it does **not** provide multi-user, multi-profile, team, or tenant isolation.
 
 ## Future GitHub installation (post-publication only)
 
-After an authorized first commit, a staging install, and publication of the intended repository, the expected Hermes CLI flow is:
+After publication of the intended repository, the expected Hermes CLI flow is:
 
 ```bash
 hermes plugins install lipebez/hermes-osb-panel --enable
 hermes dashboard --no-open
 ```
 
-These commands are not a verified installation result. They document the intended post-publication path using the current Hermes CLI form `hermes plugins install <Git URL or owner/repo> --enable`. Do not run them until `lipebez/hermes-osb-panel` actually exists and a staging test has been authorized and completed.
+These commands document the intended post-publication path using the current Hermes CLI form `hermes plugins install <Git URL or owner/repo> --enable`. Private staging validation passed, but do not run this public command until `lipebez/hermes-osb-panel` actually exists.
 
 To turn the plugin off later:
 
@@ -54,6 +54,18 @@ hermes plugins remove hermes-osb-panel
 ```
 
 `hermes dashboard --stop` stops the local dashboard process; start it again with the appropriate local dashboard command when needed. Use `hermes dashboard --no-open` when a start without opening a browser is desired.
+
+### Windows ReadOnly removal recovery
+
+The Windows staging test disabled the plugin successfully, but the first removal encountered `WinError 5` because Git pack `.idx`, `.pack`, and `.rev` files inside the plugin directory were ReadOnly. This is a Windows host/CLI cleanup recovery, not a panel behavior failure. **Only after the plugin is already disabled**, and only when that specific Windows removal error occurs, set `$pluginDir` to that already-disabled `hermes-osb-panel` directory and clear the ReadOnly attribute from files below it:
+
+```powershell
+$pluginDir = '<already-disabled hermes-osb-panel plugin directory>'
+Get-ChildItem -LiteralPath $pluginDir -Recurse -File | ForEach-Object { $_.IsReadOnly = $false }
+hermes plugins remove hermes-osb-panel
+```
+
+This narrow recovery does not delete files or target other plugins. Do not use it as a generic removal step.
 
 ## Fail-closed local direct-reader prototype
 
@@ -90,7 +102,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests -v
 PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'import ast, pathlib; [ast.parse(pathlib.Path(path).read_text(encoding="utf-8"), filename=path) for path in ("__init__.py", "dashboard/plugin_api.py", "dashboard/snapshot_contract.py", "scripts/qa_dashboard_cdp.py")]'
 ```
 
-The archive release scanner is deliberately different: after an explicitly authorized first commit exists, run `PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/check_public_release.py`. It scans only `git archive HEAD` and fails closed when there is no `HEAD`; it must not be replaced with a working-tree scan. This candidate has no archive-validation result yet.
+The archive release scanner is deliberately different: after an explicitly authorized first public-release commit exists, run `PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/check_public_release.py`. It scans only `git archive HEAD` and fails closed when there is no `HEAD`; it must not be replaced with a working-tree scan. The private staging archive gate passed; that result does not publish this candidate or replace the post-publication gate.
 
 ## Contributing and license
 
