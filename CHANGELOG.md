@@ -20,7 +20,7 @@ All notable changes to Hermes OSB Panel will be documented in this file.
 ### Compatibility notes
 
 - Hermes development/dashboard behavior was validated in local fixture QA against Hermes Agent v0.19.0 (2026.7.20), plus one Windows PowerShell clean-host private-staging installation test.
-- The private-staging archive gate passed. A public source repository, when available at `lipebez/hermes-osb-panel`, does not by itself publish a package, tag, or GitHub Release.
+- The private-staging archive gate passed. The public source repository at `lipebez/hermes-osb-panel` does not by itself publish a package, tag, or GitHub Release.
 - No OSB release-version compatibility range or production OSB adapter has been verified.
 
 ## Package metadata 3.1.0 (pre-publication)

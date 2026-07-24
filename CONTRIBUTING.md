@@ -7,7 +7,7 @@ Thank you for helping improve an independent community companion. Hermes OSB Pan
 - Work only with sanitized fixtures, especially `tests/fixtures/demo_snapshot_v1.json`.
 - Do not add a production OSB adapter, private OSB imports, `o2b` subprocess calls, background indexing, mutation, or a parallel memory store without a separately approved public contract.
 - Do not claim support for a Hermes or OSB release unless a clean installation and the stated compatibility scope were actually verified.
-- The intended GitHub repository is not published yet. Do not present its future install command as tested or open a remote action without separate authorization.
+- The public source repository is https://github.com/lipebez/hermes-osb-panel. Do not present its install command as broad compatibility validation or open a remote action without separate authorization.
 
 ## Privacy guardrails
 
@@ -57,4 +57,4 @@ Mention the fixture used, checks run, and any manual QA intentionally not run in
 
 ## Security reports
 
-Do not file vulnerabilities as public issues. Follow [`SECURITY.md`](SECURITY.md). Before public launch, **GitHub private vulnerability reporting** must be enabled; if it is unavailable, do not include sensitive details in an issue and contact `@lipebez` through GitHub instead.
+Do not file vulnerabilities as public issues. **GitHub private vulnerability reporting is enabled**; follow [`SECURITY.md`](SECURITY.md) to submit a private report. If it becomes unavailable, do not include sensitive details in an issue and contact `@lipebez` through GitHub instead.

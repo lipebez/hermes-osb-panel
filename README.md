@@ -2,7 +2,7 @@
 
 Hermes OSB Panel is a read-only dashboard companion for normalized Open Second Brain (OSB) snapshots in Hermes Agent. It is an independent community project by Filipe Bezerra (`@lipebez`): it is not an official Hermes Agent or Open Second Brain module and is not affiliated with, endorsed by, or maintained by either project.
 
-> **Source and package status.** Current release: `3.1.0` is **unreleased** package metadata: no package artifact, tag, or GitHub Release is published. Private staging validation, including its archive gate, has passed, but private staging is not a public release. The intended public source path is `lipebez/hermes-osb-panel`; use the GitHub installation command below only after verifying that repository and commit are accessible. Source availability alone does not publish a package release.
+> **Source and package status.** Current release: `3.1.0` is **unreleased** package metadata: no package artifact, tag, or GitHub Release is published. Private staging validation, including its archive gate, has passed, but private staging is not a public release. The public source repository is https://github.com/lipebez/hermes-osb-panel; use the GitHub installation command below only after verifying the repository and commit. Source availability alone does not publish a package release.
 
 ## What it does
 
