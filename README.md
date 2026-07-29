@@ -47,21 +47,23 @@ hermes plugins disable hermes-osb-panel
 hermes dashboard --stop
 ```
 
-To remove it:
+To remove it fully, stop the dashboard, disable the plugin, then run the official removal command:
 
 ```bash
+hermes dashboard --stop
+hermes plugins disable hermes-osb-panel
 hermes plugins remove hermes-osb-panel
 ```
 
-`hermes dashboard --stop` stops the local dashboard process; start it again with the appropriate local dashboard command when needed. Use `hermes dashboard --no-open` when a start without opening a browser is desired.
+Confirm that the local plugin directory no longer exists before a clean reinstall. `hermes dashboard --stop` stops the local dashboard process; start it again with the appropriate local dashboard command when needed. Use `hermes dashboard --no-open` when a start without opening a browser is desired.
 
 ### Windows ReadOnly removal recovery
 
 The Windows staging test disabled the plugin successfully, but the first removal encountered `WinError 5` because Git pack `.idx`, `.pack`, and `.rev` files inside the plugin directory were ReadOnly. This is a Windows host/CLI cleanup recovery, not a panel behavior failure. **Only after the plugin is already disabled**, and only when that specific Windows removal error occurs, set `$pluginDir` to that already-disabled `hermes-osb-panel` directory and clear the ReadOnly attribute from files below it:
 
 ```powershell
-$pluginDir = '<already-disabled hermes-osb-panel plugin directory>'
-Get-ChildItem -LiteralPath $pluginDir -Recurse -File | ForEach-Object { $_.IsReadOnly = $false }
+$pluginDir = Join-Path $env:LOCALAPPDATA 'hermes\plugins\hermes-osb-panel'
+Get-ChildItem -LiteralPath $pluginDir -Recurse -File -Force | ForEach-Object { $_.IsReadOnly = $false }
 hermes plugins remove hermes-osb-panel
 ```
 

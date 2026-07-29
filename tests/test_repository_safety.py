@@ -238,6 +238,22 @@ class RepositorySafetyTests(unittest.TestCase):
                 positions = [readme.index(command, start) for command in commands]
                 self.assertEqual(positions, sorted(positions))
 
+    def test_windows_readonly_recovery_targets_hidden_files_not_directories(self):
+        local_app_data = "$env:LOCAL" + "APPDATA"
+        path_separator = chr(92)
+        expected = (
+            f"$pluginDir = Join-Path {local_app_data} 'hermes{path_separator}plugins{path_separator}hermes-osb-panel'",
+            "Get-ChildItem -LiteralPath $pluginDir -Recurse -File -Force | ForEach-Object { $_.IsReadOnly = $false }",
+            "hermes plugins remove hermes-osb-panel",
+        )
+        headings = {"README.md": "### Windows ReadOnly removal recovery", "docs/qa.md": "## Windows disable/remove recovery"}
+        for relative, heading in headings.items():
+            with self.subTest(document=relative):
+                text = (ROOT / relative).read_text(encoding="utf-8")
+                start = text.index(heading)
+                positions = [text.index(command, start) for command in expected]
+                self.assertEqual(positions, sorted(positions))
+
 
 if __name__ == "__main__":
     unittest.main()

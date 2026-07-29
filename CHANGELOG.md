@@ -8,6 +8,7 @@ All notable changes to Hermes OSB Panel will be documented in this file.
 
 - Localized all browser-visible dashboard interface strings and normalized vault-area labels to English, including navigation, filters, graph controls, inspectors, activity views, command palette, accessibility labels, empty/error states, and copy feedback. User-authored note content remains untouched.
 - Updated behavioral CDP QA to exercise the English controls, preserve the same data hooks and privacy boundary, and validate heading typography only when the selected fixture renders that heading level.
+- Clarified complete plugin removal and corrected Windows `WinError 5` recovery: stop the dashboard, disable the plugin, target the installed directory explicitly, and clear ReadOnly only on hidden files before retrying the official CLI removal.
 
 ### Added
 

@@ -89,8 +89,8 @@ hermes plugins disable hermes-osb-panel
 In the recorded staging test, the initial official removal returned `WinError 5` because ReadOnly Git pack `.idx`, `.pack`, and `.rev` files remained inside the already-disabled plugin directory. Treat this as a Windows host/CLI cleanup condition, not as a panel failure. Only in that condition, set `$pluginDir` to the already-disabled `hermes-osb-panel` directory, clear ReadOnly on files recursively inside that single directory, then retry the official command:
 
 ```powershell
-$pluginDir = '<already-disabled hermes-osb-panel plugin directory>'
-Get-ChildItem -LiteralPath $pluginDir -Recurse -File | ForEach-Object { $_.IsReadOnly = $false }
+$pluginDir = Join-Path $env:LOCALAPPDATA 'hermes\plugins\hermes-osb-panel'
+Get-ChildItem -LiteralPath $pluginDir -Recurse -File -Force | ForEach-Object { $_.IsReadOnly = $false }
 hermes plugins remove hermes-osb-panel
 ```
 
