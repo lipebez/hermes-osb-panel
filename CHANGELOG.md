@@ -4,6 +4,11 @@ All notable changes to Hermes OSB Panel will be documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- Localized all browser-visible dashboard interface strings and normalized vault-area labels to English, including navigation, filters, graph controls, inspectors, activity views, command palette, accessibility labels, empty/error states, and copy feedback. User-authored note content remains untouched.
+- Updated behavioral CDP QA to exercise the English controls, preserve the same data hooks and privacy boundary, and validate heading typography only when the selected fixture renders that heading level.
+
 ### Added
 
 - Public documentation for the independent-community status, read-only snapshot boundary, fail-closed direct-reader opt-in, privacy rules, manual QA, contribution guardrails, and vulnerability reporting process.

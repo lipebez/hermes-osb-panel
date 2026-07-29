@@ -414,10 +414,10 @@ def behavior_probes(cdp: CDP, width: int) -> dict[str, Any]:
     )
     probes["shortcut"]["passed"] = bool(probes["shortcut"].get("focused"))
 
-    # Tudo must clear every dimension; use data hooks when available.
-    click_js(cdp, "[...document.querySelectorAll('[data-area-filter],.folder-name')].find(e => /Projetos/i.test(e.textContent))")
+    # All must clear every dimension; use data hooks when available.
+    click_js(cdp, "[...document.querySelectorAll('[data-area-filter],.folder-name')].find(e => /Projects/i.test(e.textContent))")
     click_js(cdp, "[...document.querySelectorAll('.chip,[data-layer-filter]')].find(e => /Brain/i.test(e.textContent))")
-    click_js(cdp, "[...document.querySelectorAll('.chip,[data-preset]')].find(e => /^Tudo$/i.test(e.textContent.trim()))")
+    click_js(cdp, "[...document.querySelectorAll('.chip,[data-preset]')].find(e => /^All$/i.test(e.textContent.trim()))")
     time.sleep(0.2)
     probes["filter_reset"] = cdp.evaluate(
         """(() => { const a=document.querySelector('[data-active-area]'); const q=document.querySelector('.osb-search-input');
@@ -430,12 +430,12 @@ def behavior_probes(cdp: CDP, width: int) -> dict[str, Any]:
     probes["filter_reset"]["passed"] = not probes["filter_reset"].get("activeArea") and not probes["filter_reset"].get("query") and (not all_count or str(all_count) in text)
 
     # Cross-area navigation: choose any clickable Vault/Inbox card while Projects is active.
-    click_js(cdp, "[...document.querySelectorAll('[data-area-filter],.folder-name')].find(e => /Projetos/i.test(e.textContent))")
+    click_js(cdp, "[...document.querySelectorAll('[data-area-filter],.folder-name')].find(e => /Projects/i.test(e.textContent))")
     click_js(cdp, "[...document.querySelectorAll('.bp-tab')].find(e => /Vault Notes/i.test(e.textContent))")
     time.sleep(0.1)
     clicked = cdp.evaluate(
         """(() => { const cards=[...document.querySelectorAll('.bp-vault-card,[data-node-card]')];
-          const card=cards.find(c=>!/projet/i.test((c.dataset.area||'')+' '+c.textContent))||cards[0];
+          const card=cards.find(c=>!/project/i.test((c.dataset.area||'')+' '+c.textContent))||cards[0];
           if(!card)return {clicked:false}; const wanted=card.dataset.nodeId||''; const label=(card.querySelector('.bp-vault-label')||card).textContent.trim();card.click();return {clicked:true,wanted,label}; })()"""
     )
     time.sleep(0.2)
@@ -454,7 +454,7 @@ def behavior_probes(cdp: CDP, width: int) -> dict[str, Any]:
     probes["explorer_disclosure"]["passed"] = bool(probes["explorer_disclosure"].get("present"))
 
     if original_selected:
-        click_js(cdp, "[...document.querySelectorAll('.chip,[data-preset]')].find(e => /^Tudo$/i.test(e.textContent.trim()))")
+        click_js(cdp, "[...document.querySelectorAll('.chip,[data-preset]')].find(e => /^All$/i.test(e.textContent.trim()))")
         time.sleep(0.15)
         click_js(cdp, f"[...document.querySelectorAll('[data-graph-list] [data-node-id]')].find(x=>x.dataset.nodeId==={json.dumps(original_selected)})")
         time.sleep(0.2)
@@ -602,24 +602,24 @@ def behavior_probes(cdp: CDP, width: int) -> dict[str, Any]:
         click_js(cdp, "document.querySelector('[data-collapse-pane=\"explorer\"]')")
         time.sleep(0.25)
         layout["sidebarCollapsed"] = cdp.evaluate("document.querySelector('.sidebar').getBoundingClientRect().width")
-        click_js(cdp, "document.querySelector('[aria-label=\"Mostrar explorador\"]')")
+        click_js(cdp, "document.querySelector('[aria-label=\"Show explorer\"]')")
         time.sleep(0.25)
         layout["sidebarRestored"] = cdp.evaluate("document.querySelector('.sidebar').getBoundingClientRect().width")
-        click_js(cdp, "[...document.querySelectorAll('.toolbar-btn')].find(x=>/Expandir grafo/.test(x.textContent))")
+        click_js(cdp, "[...document.querySelectorAll('.toolbar-btn')].find(x=>/Expand graph/.test(x.textContent))")
         time.sleep(0.2)
         layout["expanded"] = cdp.evaluate("(() => ({active:document.querySelector('.osb-app').classList.contains('graph-maximized'),sidebar:getComputedStyle(document.querySelector('.sidebar')).display,note:getComputedStyle(document.querySelector('.note-pane')).display,bottom:getComputedStyle(document.querySelector('.bottom-panel')).display}))()")
-        click_js(cdp, "[...document.querySelectorAll('.toolbar-btn')].find(x=>/Sair do modo expandido/.test(x.textContent))")
+        click_js(cdp, "[...document.querySelectorAll('.toolbar-btn')].find(x=>/Exit expanded mode/.test(x.textContent))")
         time.sleep(0.15)
         click_js(cdp, "document.querySelector('[data-collapse-pane=\"activity\"]')")
         time.sleep(0.15)
         layout["activityCollapsed"] = cdp.evaluate("getComputedStyle(document.querySelector('.bottom-panel')).display")
-        click_js(cdp, "[...document.querySelectorAll('.toolbar-btn')].find(x=>/Mostrar atividade/.test(x.textContent))")
+        click_js(cdp, "[...document.querySelectorAll('.toolbar-btn')].find(x=>/Show activity/.test(x.textContent))")
         time.sleep(0.15)
         layout["activityRestored"] = cdp.evaluate("getComputedStyle(document.querySelector('.bottom-panel')).display")
         click_js(cdp, "document.querySelector('[data-collapse-pane=\"inspector\"]')")
         time.sleep(0.15)
         layout["inspectorCollapsed"] = cdp.evaluate("document.querySelector('.note-pane').getBoundingClientRect().width")
-        click_js(cdp, "[...document.querySelectorAll('.toolbar-btn')].find(x=>/Redefinir painéis/.test(x.textContent))")
+        click_js(cdp, "[...document.querySelectorAll('.toolbar-btn')].find(x=>/Reset panels/.test(x.textContent))")
         time.sleep(0.2)
         layout["inspectorRestored"] = cdp.evaluate("document.querySelector('.note-pane').getBoundingClientRect().width")
         expanded = layout.get("expanded", {})
@@ -637,11 +637,11 @@ def behavior_probes(cdp: CDP, width: int) -> dict[str, Any]:
         probes["layout_controls"] = layout
 
         # The host has aggressive h1/h2 rules; the plugin must win with compact sizes.
-        click_js(cdp, "[...document.querySelectorAll('[data-preset]')].find(e => /^Tudo$/i.test(e.textContent.trim()))")
+        click_js(cdp, "[...document.querySelectorAll('[data-preset]')].find(e => /^All$/i.test(e.textContent.trim()))")
         time.sleep(0.08)
         candidate_count = cdp.evaluate("Math.min(20,document.querySelectorAll('[data-graph-list] [data-node-id]').length)")
         for candidate_index in range(candidate_count):
-            click_js(cdp, "[...document.querySelectorAll('[data-preset]')].find(e => /^Tudo$/i.test(e.textContent.trim()))")
+            click_js(cdp, "[...document.querySelectorAll('[data-preset]')].find(e => /^All$/i.test(e.textContent.trim()))")
             time.sleep(0.03)
             click_js(cdp, f"document.querySelectorAll('[data-graph-list] [data-node-id]')[{candidate_index}]")
             time.sleep(0.05)
@@ -649,7 +649,7 @@ def behavior_probes(cdp: CDP, width: int) -> dict[str, Any]:
                 break
         typography = cdp.evaluate("""(() => { const h1=document.querySelector('.markdown-rendered h1'),h2=document.querySelector('.markdown-rendered h2');
           return {title:(document.querySelector('.note-title')||{}).textContent||'',h1:h1?getComputedStyle(h1).fontSize:null,h2:h2?getComputedStyle(h2).fontSize:null,h1Weight:h1?getComputedStyle(h1).fontWeight:null,h2Weight:h2?getComputedStyle(h2).fontWeight:null}; })()""")
-        typography["passed"] = typography.get("h1") == "15px" and typography.get("h2") == "13px" and typography.get("h1Weight") in {"590", "600"} and typography.get("h2Weight") in {"590", "600"}
+        typography["passed"] = typography.get("h1") == "15px" and typography.get("h1Weight") in {"590", "600"} and (typography.get("h2") is None or (typography.get("h2") == "13px" and typography.get("h2Weight") in {"590", "600"}))
         probes["rendered_typography"] = typography
 
     probes["product_features"] = cdp.evaluate(
@@ -667,7 +667,7 @@ def behavior_probes(cdp: CDP, width: int) -> dict[str, Any]:
     )
     product = probes["product_features"]
     inspector_actions = product.get("inspectorActions", [])
-    product["passed"] = {"rendered", "source"}.issubset(set(product.get("inspectorModes", []))) and all(product.get(k) for k in ("refresh", "timelineRange", "savedViews", "clusterExplain", "graphList")) and len(inspector_actions) == 2 and all(item.get("svg") and not item.get("text") and item.get("title") in {"Copiar caminho", "Copiar wikilink"} for item in inspector_actions) and product.get("splitters", 0) >= 2 and product.get("collapse", 0) >= 3
+    product["passed"] = {"rendered", "source"}.issubset(set(product.get("inspectorModes", []))) and all(product.get(k) for k in ("refresh", "timelineRange", "savedViews", "clusterExplain", "graphList")) and len(inspector_actions) == 2 and all(item.get("svg") and not item.get("text") and item.get("title") in {"Copy path", "Copy wikilink"} for item in inspector_actions) and product.get("splitters", 0) >= 2 and product.get("collapse", 0) >= 3
 
     # Saved views must create, reopen and remove in-session; cluster summary stays deterministic.
     click_js(cdp, "document.querySelector('[data-action=\"toggle-views\"]')")
@@ -685,7 +685,7 @@ def behavior_probes(cdp: CDP, width: int) -> dict[str, Any]:
     removed = wait_for(cdp, "document.querySelectorAll('.saved-view-row').length===0", timeout=3)
     click_js(cdp, "document.querySelector('[data-action=\"toggle-views\"]')")
     wait_for(cdp, "!document.querySelector('.views-drawer.open')", timeout=3)
-    probes["saved_views"] = {"created": bool(created), "removed": bool(removed), "deterministic": summary.startswith("Resumo determinístico:"), "passed": bool(created and removed and summary.startswith("Resumo determinístico:"))}
+    probes["saved_views"] = {"created": bool(created), "removed": bool(removed), "deterministic": summary.startswith("Deterministic summary:"), "passed": bool(created and removed and summary.startswith("Deterministic summary:"))}
 
     if width > 390:
         cdp.evaluate("(() => { const s=document.querySelector('.sidebar'),b=document.querySelector('.bp-content'); if(s)s.scrollTop=s.scrollHeight; if(b)b.scrollTop=b.scrollHeight; })()")

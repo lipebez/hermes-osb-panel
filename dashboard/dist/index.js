@@ -155,12 +155,12 @@
     return areaColor(node.area||"other");
   }
   function kindLabel(k){
-    var l={active:"Active",preference:"Preferência",signal:"Sinal",log:"Log",retired:"Retired",note:"Nota",vault:"Vault",brain:"Brain"};
-    return l[k]||k||"Nota";
+    var l={active:"Active",preference:"Preference",signal:"Signal",log:"Log",retired:"Retired",note:"Note",vault:"Vault",brain:"Brain"};
+    return l[k]||k||"Note";
   }
   function areaLabel(a){
-    var l={brain:"Brain",inbox:"Inbox",projects:"Projetos",clients:"Clientes",runbooks:"Runbooks",decisions:"Decisões",references:"Referências",templates:"Templates",other:"Outros"};
-    return l[a]||a||"Outros";
+    var l={brain:"Brain",inbox:"Inbox",projects:"Projects",clients:"Clients",runbooks:"Runbooks",decisions:"Decisions",references:"References",templates:"Templates",other:"Other"};
+    return l[a]||a||"Other";
   }
   function areaDotClass(area){
     return "dot-"+(area||"other");
@@ -462,15 +462,15 @@
     return h2("div", { className: "graph-pane" },
       h2("canvas", { ref: canvasRef, id: "graphCanvas" }),
       h2("div", { className: "graph-controls", "data-graph-controls": true },
-        h2("button", { className: "control-btn", title: "Aumentar zoom", "data-tooltip":"Aumentar zoom", "aria-label":"Aumentar zoom", "data-graph-control": "zoom-in" }, "+"),
-        h2("button", { className: "control-btn", title: "Diminuir zoom", "data-tooltip":"Diminuir zoom", "aria-label":"Diminuir zoom", "data-graph-control": "zoom-out" }, "−"),
-        h2("button", { className: "control-btn", title: "Enquadrar todos os nós", "data-tooltip":"Enquadrar tudo", "aria-label":"Enquadrar todos os nós", "data-graph-control": "fit-all" }, uiIcon("frame",15)),
-        h2("button", { className: "control-btn", title: selected?"Focar a nota e conexões diretas":"Selecione uma nota para focar", "data-tooltip":"Focar seleção", "aria-label":"Focar a nota e conexões diretas", disabled:!selected, "data-graph-control": "fit-selection" }, uiIcon("target",15))
+        h2("button", { className: "control-btn", title: "Zoom in", "data-tooltip":"Zoom in", "aria-label":"Zoom in", "data-graph-control": "zoom-in" }, "+"),
+        h2("button", { className: "control-btn", title: "Zoom out", "data-tooltip":"Zoom out", "aria-label":"Zoom out", "data-graph-control": "zoom-out" }, "−"),
+        h2("button", { className: "control-btn", title: "Fit all nodes", "data-tooltip":"Fit all", "aria-label":"Fit all nodes", "data-graph-control": "fit-all" }, uiIcon("frame",15)),
+        h2("button", { className: "control-btn", title: selected?"Focus selected note and direct connections":"Select a note to focus", "data-tooltip":"Focus selection", "aria-label":"Focus selected note and direct connections", disabled:!selected, "data-graph-control": "fit-selection" }, uiIcon("target",15))
       ),
       h2("div", { className: "graph-info" },
-        h2("span", null, "NÓS: ", h2("span", { className: "val" }, fmt(nodes.length))),
+        h2("span", null, "NODES: ", h2("span", { className: "val" }, fmt(nodes.length))),
         h2("span", null, "LINKS: ", h2("span", { className: "val" }, fmt(edges.length))),
-        h2("span", null, selected ? "▸ " + trunc(cleanLabel(selected.label), 18) : "Passe o mouse")
+        h2("span", null, selected ? "▸ " + trunc(cleanLabel(selected.label), 18) : "Hover a node")
       )
     );
   }
@@ -555,16 +555,16 @@
       return function(){destroyed=true;stopLoop();diagnostics.cleanups++;diagnostics.activeListenerSets=Math.max(0,diagnostics.activeListenerSets-1);window.removeEventListener("resize",resize);canvas.removeEventListener("pointerdown",pointerDown);canvas.removeEventListener("pointermove",pointerMove);canvas.removeEventListener("pointerup",pointerUp);canvas.removeEventListener("pointercancel",pointerUp);canvas.removeEventListener("wheel",wheel);if(controls)controls.removeEventListener("click",control);if(window.__OSB_GRAPH__===bridge)delete window.__OSB_GRAPH__};
     });
     return h2("div",{className:"graph-pane graph-pane-3d","data-graph-mode":"3d"},
-      h2("canvas",{ref:canvasRef,id:"graphCanvas3D","aria-label":"Grafo tridimensional interativo"}),
+      h2("canvas",{ref:canvasRef,id:"graphCanvas3D","aria-label":"Interactive three-dimensional graph"}),
       h2("div",{className:"graph-controls","data-graph-controls":true},
-        h2("button",{className:"control-btn",title:"Aproximar câmera","data-tooltip":"Aproximar","aria-label":"Aproximar câmera","data-graph-control":"zoom-in"},"+"),
-        h2("button",{className:"control-btn",title:"Afastar câmera","data-tooltip":"Afastar","aria-label":"Afastar câmera","data-graph-control":"zoom-out"},"−"),
-        h2("button",{className:"control-btn",title:"Reenquadrar universo","data-tooltip":"Reenquadrar","aria-label":"Reenquadrar universo","data-graph-control":"fit-all"},uiIcon("frame",15)),
-        h2("button",{className:"control-btn",title:"Focar nota selecionada","data-tooltip":"Focar seleção","aria-label":"Focar nota selecionada",disabled:!selected,"data-graph-control":"fit-selection"},uiIcon("target",15)),
-        h2("button",{className:"control-btn orbit-control",title:reducedMotion?"Órbita automática desativada por movimento reduzido":"Alternar órbita automática","data-tooltip":"Órbita automática","aria-label":"Alternar órbita automática","aria-pressed":!reducedMotion,disabled:reducedMotion,"data-graph-control":"toggle-orbit"},"◎")
+        h2("button",{className:"control-btn",title:"Zoom in","data-tooltip":"Zoom in","aria-label":"Zoom in","data-graph-control":"zoom-in"},"+"),
+        h2("button",{className:"control-btn",title:"Zoom out","data-tooltip":"Zoom out","aria-label":"Zoom out","data-graph-control":"zoom-out"},"−"),
+        h2("button",{className:"control-btn",title:"Fit scene","data-tooltip":"Fit scene","aria-label":"Fit scene","data-graph-control":"fit-all"},uiIcon("frame",15)),
+        h2("button",{className:"control-btn",title:"Focus selected note","data-tooltip":"Focus selection","aria-label":"Focus selected note",disabled:!selected,"data-graph-control":"fit-selection"},uiIcon("target",15)),
+        h2("button",{className:"control-btn orbit-control",title:reducedMotion?"Automatic orbit is disabled for reduced motion":"Toggle automatic orbit","data-tooltip":"Automatic orbit","aria-label":"Toggle automatic orbit","aria-pressed":!reducedMotion,disabled:reducedMotion,"data-graph-control":"toggle-orbit"},"◎")
       ),
-      h2("div",{className:"graph-dimension-badge"},reducedMotion?"3D · movimento reduzido":"3D · arraste para orbitar · scroll para zoom"),
-      h2("div",{className:"graph-info"},h2("span",null,"NÓS: ",h2("span",{className:"val"},fmt(nodes.length))),h2("span",null,"LINKS: ",h2("span",{className:"val"},fmt(edges.length))),h2("span",null,selected?"▸ "+trunc(cleanLabel(selected.label),18):"Universo 3D"))
+      h2("div",{className:"graph-dimension-badge"},reducedMotion?"3D · reduced motion":"3D · drag to orbit · scroll to zoom"),
+      h2("div",{className:"graph-info"},h2("span",null,"NODES: ",h2("span",{className:"val"},fmt(nodes.length))),h2("span",null,"LINKS: ",h2("span",{className:"val"},fmt(edges.length))),h2("span",null,selected?"▸ "+trunc(cleanLabel(selected.label),18):"3D universe"))
     );
   }
 
@@ -587,8 +587,8 @@
       var t=Date.parse(ev.timestamp);return !isNaN(t)&&t>=cutoff;
     });
     var tabs=[
-      {key:"timeline",label:"Atividade",count:filteredEvents.length},
-      {key:"artifacts",label:"Artefatos",count:artifacts.length},
+      {key:"timeline",label:"Activity",count:filteredEvents.length},
+      {key:"artifacts",label:"Artifacts",count:artifacts.length},
       {key:"vault",label:"Vault Notes",count:vaultNotes.length},
       {key:"active",label:"Active Memory",count:activePreview?"★":0}
     ];
@@ -597,20 +597,20 @@
       return ev.time||"";
     }
     function cardNode(item){return props.nodeMap&&props.nodeMap[item.id]||item}
-    return h2("section",{className:"bottom-panel","data-mobile-surface":"activity","data-timeline-range":range,"aria-label":"Atividade e coleções"},
+    return h2("section",{className:"bottom-panel","data-mobile-surface":"activity","data-timeline-range":range,"aria-label":"Activity and collections"},
       h2("div",{className:"bp-head"},
         h2("div",{className:"bp-tabs",role:"tablist"},tabs.map(function(t){return h2("button",{
           key:t.key,className:"bp-tab"+(tab===t.key?" active":""),role:"tab","aria-selected":tab===t.key,
           onClick:function(){setTab(t.key)}
         },t.label,t.count?h2("span",{className:"bp-count"},t.count):null)})),
-        h2("button",{className:"pane-action pane-action-label","data-collapse-pane":"activity",title:"Ocultar o painel de atividade","aria-label":"Recolher atividade",onClick:props.onCollapse},uiIcon("down",13),h2("span",null,"Recolher"))
+        h2("button",{className:"pane-action pane-action-label","data-collapse-pane":"activity",title:"Hide activity panel","aria-label":"Collapse activity",onClick:props.onCollapse},uiIcon("down",13),h2("span",null,"Collapse"))
       ),
       tab==="timeline"?h2("div",{className:"timeline-filters"},
         h2("div",{"data-timeline-range":range,className:"filter-chips"},[
-          ["today","Hoje"],["7d","7 dias"],["30d","30 dias"]
+          ["today","Today"],["7d","7 days"],["30d","30 days"]
         ].map(function(x){return h2("button",{className:"chip"+(range===x[0]?" active":""),onClick:function(){setRange(x[0])}},x[1])})),
-        h2("select",{className:"compact-select",value:eventKind,"aria-label":"Filtrar atividade",onChange:function(e){setEventKind(e.target.value)}},
-          ["all","brain","projects","preference","signal","log","modified","created"].map(function(k){return h2("option",{value:k},k==="all"?"Todos os tipos":kindLabel(k))}))
+        h2("select",{className:"compact-select",value:eventKind,"aria-label":"Filter activity",onChange:function(e){setEventKind(e.target.value)}},
+          ["all","brain","projects","preference","signal","log","modified","created"].map(function(k){return h2("option",{value:k},k==="all"?"All types":kindLabel(k))}))
       ):null,
       h2("div",{className:"bp-content"},
         tab==="timeline"?(filteredEvents.length?h2("div",{className:"timeline-list"},filteredEvents.map(function(ev,i){
@@ -618,29 +618,29 @@
           return h2("button",{key:(ev.timestamp||ev.time||"")+i,className:"timeline-card kind-"+(ev.kind||"modified"),disabled:!node,
             "data-node-id":ev.node_id||"",onClick:function(){if(node)onNavigate(node)}},
             h2("span",{className:"event-mark","aria-hidden":"true"}),
-            h2("span",{className:"event-body"},h2("span",{className:"bp-log-time"},eventTime(ev)),h2("strong",null,ev.kind||"modified"),h2("span",{className:"bp-log-text"},trunc(ev.text||ev.label||"Arquivo atualizado",140))),
+            h2("span",{className:"event-body"},h2("span",{className:"bp-log-time"},eventTime(ev)),h2("strong",null,ev.kind||"modified"),h2("span",{className:"bp-log-text"},trunc(ev.text||ev.label||"Updated file",140))),
             ev.area?h2("span",{className:"tag"},areaLabel(ev.area)):null)
-        })):h2("div",{className:"bp-empty"},"Sem eventos reais neste período.")):
+        })):h2("div",{className:"bp-empty"},"No real events in this range.")):
         tab==="artifacts"?(artifacts.length?h2("div",{className:"bp-grid"},artifacts.map(function(a,i){var n=cardNode(a);return h2("button",{
           key:a.id||i,className:"bp-art-card"+(selected&&selected.id===a.id?" selected":""),"data-node-card":"artifact","data-node-id":a.id||"",onClick:function(){onNavigate(n)}
-        },h2("span",{className:"bp-art-kind"},h2("span",{className:"dot-"+(a.kind||"note")}),kindLabel(a.kind)),h2("span",{className:"bp-art-label"},trunc(cleanLabel(a.label),44)),a.topic?h2("span",{className:"bp-art-topic"},a.topic):null)})):h2("div",{className:"bp-empty"},"Nenhum artefato.")):
+        },h2("span",{className:"bp-art-kind"},h2("span",{className:"dot-"+(a.kind||"note")}),kindLabel(a.kind)),h2("span",{className:"bp-art-label"},trunc(cleanLabel(a.label),44)),a.topic?h2("span",{className:"bp-art-topic"},a.topic):null)})):h2("div",{className:"bp-empty"},"No artifacts.")):
         tab==="vault"?(vaultNotes.length?h2("div",{className:"bp-grid"},vaultNotes.map(function(v,i){var n=cardNode(v);return h2("button",{
           key:v.id||i,className:"bp-vault-card"+(selected&&selected.id===v.id?" selected":""),"data-node-card":"vault","data-node-id":v.id||"","data-area":v.area||"other",onClick:function(){onNavigate(n)}
-        },h2("span",{className:"bp-vault-area"},h2("span",{className:"dot-"+(v.area||"other")}),areaLabel(v.area)),h2("span",{className:"bp-vault-label"},trunc(cleanLabel(v.label),44)),h2("span",{className:"bp-vault-path"},trunc(v.id,58)))})):h2("div",{className:"bp-empty"},"Nenhuma nota no vault.")):
-        activePreview?h2("pre",{className:"bp-pre"},activePreview):h2("div",{className:"bp-empty"},"Active Memory indisponível."),
+        },h2("span",{className:"bp-vault-area"},h2("span",{className:"dot-"+(v.area||"other")}),areaLabel(v.area)),h2("span",{className:"bp-vault-label"},trunc(cleanLabel(v.label),44)),h2("span",{className:"bp-vault-path"},trunc(v.id,58)))})):h2("div",{className:"bp-empty"},"No notes in the vault.")):
+        activePreview?h2("pre",{className:"bp-pre"},activePreview):h2("div",{className:"bp-empty"},"Active Memory is unavailable."),
         ((tab==="artifacts"&&limits.artifacts)||(tab==="vault"&&limits.vault_notes))?h2("div",{className:"dataset-cap"},
-          (tab==="artifacts"?limits.artifacts.shown:limits.vault_notes.shown)+" de "+(tab==="artifacts"?limits.artifacts.total:limits.vault_notes.total)+
-          ((tab==="artifacts"?limits.artifacts.truncated:limits.vault_notes.truncated)?" · limite do snapshot":"")):null
+          (tab==="artifacts"?limits.artifacts.shown:limits.vault_notes.shown)+" of "+(tab==="artifacts"?limits.artifacts.total:limits.vault_notes.total)+
+          ((tab==="artifacts"?limits.artifacts.truncated:limits.vault_notes.truncated)?" · snapshot limit":"")):null
       )
     );
   }
 
   var SESSION_STATE={noteWidth:340,activityHeight:300,graphDimension:"2d",collapsed:{explorer:false,inspector:false,activity:false},savedViews:[]};
   function timeAgo(value){
-    var t=Date.parse(value||"");if(isNaN(t))return "agora";
+    var t=Date.parse(value||"");if(isNaN(t))return "now";
     var sec=Math.max(0,Math.floor((Date.now()-t)/1000));
-    if(sec<60)return "há "+sec+"s";if(sec<3600)return "há "+Math.floor(sec/60)+"min";
-    if(sec<86400)return "há "+Math.floor(sec/3600)+"h";return "há "+Math.floor(sec/86400)+"d";
+    if(sec<60)return sec+"s ago";if(sec<3600)return Math.floor(sec/60)+"m ago";
+    if(sec<86400)return Math.floor(sec/3600)+"h ago";return Math.floor(sec/86400)+"d ago";
   }
   function fuzzyScore(node,q){
     q=String(q||"").trim().toLowerCase();if(!q)return 1;
@@ -663,15 +663,15 @@
       else if(/^```/.test(line)){flush()}
       else if(!line.trim()){flush()}
       else{flush();out.push(h2("p",{key:"p"+i},line))}
-    });flush();return out.length?out:h2("p",null,"Sem preview disponível.");
+    });flush();return out.length?out:h2("p",null,"No preview available.");
   }
   function deterministicCluster(nodes){
-    nodes=asArray(nodes);if(!nodes.length)return "Resumo determinístico: nenhum nó no recorte atual.";
+    nodes=asArray(nodes);if(!nodes.length)return "Deterministic summary: no nodes in the current selection.";
     var areas={},kinds={},tokens={};
     nodes.forEach(function(n){areas[n.area||"other"]=(areas[n.area||"other"]||0)+1;kinds[n.kind||"note"]=(kinds[n.kind||"note"]||0)+1;
-      cleanLabel(n.label).toLowerCase().split(/[^\p{L}\p{N}]+/u).forEach(function(t){if(t.length>3&&!/^(para|como|with|from|this|that|brain|nota|notes)$/.test(t))tokens[t]=(tokens[t]||0)+1})});
-    function top(obj,n){return Object.keys(obj).sort(function(a,b){return obj[b]-obj[a]||a.localeCompare(b)}).slice(0,n).map(function(k){return k+" ("+obj[k]+")"}).join(", ")||"nenhum"}
-    return "Resumo determinístico: "+nodes.length+" nós. Áreas dominantes: "+top(areas,3)+". Tipos: "+top(kinds,3)+". Termos recorrentes: "+top(tokens,5)+". Baseado apenas em metadados e títulos do recorte.";
+      cleanLabel(n.label).toLowerCase().split(/[^\p{L}\p{N}]+/u).forEach(function(t){if(t.length>3&&!/^(para|como|with|from|this|that|brain|note|notes)$/.test(t))tokens[t]=(tokens[t]||0)+1})});
+    function top(obj,n){return Object.keys(obj).sort(function(a,b){return obj[b]-obj[a]||a.localeCompare(b)}).slice(0,n).map(function(k){return k+" ("+obj[k]+")"}).join(", ")||"none"}
+    return "Deterministic summary: "+nodes.length+" nodes. Dominant areas: "+top(areas,3)+". Types: "+top(kinds,3)+". Recurring terms: "+top(tokens,5)+". Based only on metadata and titles in the current selection.";
   }
   function beginSplitter(event,axis,startValue,onValue,min,max){
     event.preventDefault();var start=axis==="x"?event.clientX:event.clientY;
@@ -795,8 +795,8 @@
     var backlinks=selected?allEdges.filter(function(e){return e.source===selected.id||e.target===selected.id}).map(function(e){var id=e.source===selected.id?e.target:e.source;return{node:nodeMap[id],kind:e.kind,outside:!baseIds[id]}}).filter(function(x){return x.node}):[];
     var searchResults=scored.filter(function(x){return query&&((restrictToDirect&&directIds[x.node.id])||(!restrictToDirect&&x.score))}).sort(function(a,b){return b.score-a.score||a.node.label.localeCompare(b.node.label)}).slice(0,10).map(function(x){return x.node});
     var commands=[
-      {id:"clear",label:"Limpar filtros"},{id:"refresh",label:"Atualizar snapshot"},{id:"fit",label:"Ajustar grafo"},
-      {id:"orphans",label:"Mostrar órfãos"},{id:"hubs",label:"Mostrar hubs"},{id:"dimension",label:"Alternar grafo 2D / 3D"},{id:"maximize",label:"Expandir grafo"},{id:"mobile",label:"Alternar modo mobile"}
+      {id:"clear",label:"Clear filters"},{id:"refresh",label:"Refresh snapshot"},{id:"fit",label:"Fit graph"},
+      {id:"orphans",label:"Show orphans"},{id:"hubs",label:"Show hubs"},{id:"dimension",label:"Toggle 2D / 3D graph"},{id:"maximize",label:"Expand graph"},{id:"mobile",label:"Toggle mobile mode"}
     ];
     var paletteItems=query?searchResults.map(function(n){return{type:"node",node:n,label:n.label}}):commands.map(function(c){return{type:"command",command:c,label:c.label}});
     function changeGraphDimension(mode){if(mode==="3d"&&!graph3dEnabled)return;SESSION_STATE.graphDimension=mode;setGraphDimension(mode);if(window.innerWidth<=768)setMobileMode("graph")}
@@ -819,8 +819,8 @@
     function setPaneCollapsed(key){var next=Object.assign({},collapsed);next[key]=!next[key];SESSION_STATE.collapsed=next;setCollapsed(next)}
     function restoreLayout(){SESSION_STATE.noteWidth=340;SESSION_STATE.activityHeight=300;SESSION_STATE.collapsed={explorer:false,inspector:false,activity:false};setNoteWidth(340);setActivityHeight(300);setCollapsed(Object.assign({},SESSION_STATE.collapsed));setGraphMax(false)}
     function copyText(text,label){
-      function done(){setCopyStatus(label+" copiado");setTimeout(function(){setCopyStatus("")},1600)}
-      if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(text).then(done).catch(function(){setCopyStatus("Não foi possível copiar")});
+      function done(){setCopyStatus(label+" copied");setTimeout(function(){setCopyStatus("")},1600)}
+      if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(text).then(done).catch(function(){setCopyStatus("Could not copy")});
       else{var ta=document.createElement("textarea");ta.value=text;document.body.appendChild(ta);ta.select();document.execCommand("copy");ta.remove();done()}
     }
     function applyPreset(id){clearFilters();setPreset(id);if(id==="brain")setActiveArea("brain");if(id==="projects")setActiveArea("projects")}
@@ -830,60 +830,60 @@
     function builtInView(id){if(id==="focus"){applyPreset("recent");setFocusDepth(selected?1:0)}else if(id==="projects")applyPreset("projects");else if(id==="memory"){applyPreset("recent");setActiveArea("brain")}else if(id==="runbooks"){clearFilters();setActiveArea("runbooks")}else applyPreset("orphans")}
 
     if(loading&&!snapshot)return h2("div",{className:"osb-app osb-loading-screen"},h2("div",{className:"osb-loader"}),h2("p",null,"Loading the read-only snapshot…"));
-    if(error&&!snapshot)return h2("div",{className:"osb-app osb-loading-screen"},h2("p",{className:"osb-error-text"},error),h2("button",{className:"action-btn",onClick:refresh},"Tentar novamente"));
+    if(error&&!snapshot)return h2("div",{className:"osb-app osb-loading-screen"},h2("p",{className:"osb-error-text"},error),h2("button",{className:"action-btn",onClick:refresh},"Try again"));
 
     var rootClass="osb-app mode-"+mobileMode+" dimension-"+graphDimension+(collapsed.explorer?" explorer-collapsed":"")+(collapsed.inspector?" inspector-collapsed":"")+(collapsed.activity?" activity-collapsed":"")+(graphMax?" graph-maximized":"");
     return h2("div",{className:rootClass,"data-all-count":allNodes.length,"data-visible-count":baseNodes.length,"data-selected-id":selectedId||"","data-active-area":activeArea||"","data-graph-dimension":graphDimension,style:{"--note-width":noteWidth+"px","--activity-height":activityHeight+"px"}},
       h2("header",null,
-        h2("div",{className:"header-left"},h2("div",{className:"logo"},h2("span",{className:"logo-mark"},uiIcon("brain",16)),"OPEN_SECOND_BRAIN"),h2("button",{className:"top-icon",title:collapsed.explorer?"Mostrar explorador do vault":"Recolher explorador do vault","aria-label":collapsed.explorer?"Mostrar explorador":"Recolher explorador","aria-expanded":!collapsed.explorer,onClick:function(){setPaneCollapsed("explorer")}},uiIcon("panel",15))),
+        h2("div",{className:"header-left"},h2("div",{className:"logo"},h2("span",{className:"logo-mark"},uiIcon("brain",16)),"OPEN_SECOND_BRAIN"),h2("button",{className:"top-icon",title:collapsed.explorer?"Show vault explorer":"Collapse vault explorer","aria-label":collapsed.explorer?"Show explorer":"Collapse explorer","aria-expanded":!collapsed.explorer,onClick:function(){setPaneCollapsed("explorer")}},uiIcon("panel",15))),
         h2("div",{className:"search-wrap"},
-          h2("label",{className:"sr-only",for:"osb-search"},"Buscar notas e comandos"),
-          h2("input",{id:"osb-search",type:"search",className:"search osb-search-input",placeholder:"Buscar ou comandar…  Ctrl+K",value:query,"aria-label":"Buscar notas e comandos","aria-expanded":paletteOpen,
+          h2("label",{className:"sr-only",for:"osb-search"},"Search notes and commands"),
+          h2("input",{id:"osb-search",type:"search",className:"search osb-search-input",placeholder:"Search or command…  Ctrl+K",value:query,"aria-label":"Search notes and commands","aria-expanded":paletteOpen,
             onFocus:function(){setPaletteOpen(true)},onChange:function(e){setQuery(e.target.value);setPaletteIndex(0);setPreset("all");setActiveArea(null)}}),
           h2("div",{className:"command-palette"+(paletteOpen?" open":""),"data-command-palette":true,"data-open":paletteOpen?"true":"false",role:"listbox"},
             paletteItems.length?h2("div",{"data-search-results":true},paletteItems.map(function(item,i){return h2("button",{className:"palette-item"+(i===paletteIndex?" active":""),role:"option","aria-selected":i===paletteIndex,"data-node-id":item.node&&item.node.id||"",onMouseDown:function(e){e.preventDefault()},onClick:function(){if(item.type==="node")navigateToNode(item.node);else runCommand(item.command.id)}},
-              h2("span",{className:"palette-type"},item.type==="node"?areaLabel(item.node.area||"brain"):"COMANDO"),h2("span",null,cleanLabel(item.label))) })):h2("div",{className:"palette-empty"},"Nenhum resultado")
+              h2("span",{className:"palette-type"},item.type==="node"?areaLabel(item.node.area||"brain"):"COMMAND"),h2("span",null,cleanLabel(item.label))) })):h2("div",{className:"palette-empty"},"No results")
           )
         ),
         h2("div",{className:"header-right"},
-          h2("button",{className:"freshness "+(error?"sync-off":"sync-on"),"data-action":"refresh",onClick:refresh,"aria-label":"Atualizar snapshot"},error?"● ERRO":"● ONLINE · "+timeAgo(snapshot&&snapshot.generated_at)),
+          h2("button",{className:"freshness "+(error?"sync-off":"sync-on"),"data-action":"refresh",onClick:refresh,"aria-label":"Refresh snapshot"},error?"● ERROR":"● ONLINE · "+timeAgo(snapshot&&snapshot.generated_at)),
           h2("span",{className:"ver"},"v3.1.0")
         )
       ),
-      error&&snapshot?h2("div",{className:"stale-banner",role:"status"},"Falha ao atualizar. Mantendo o último snapshot válido. ",h2("button",{onClick:refresh},"Tentar novamente")):null,
-      h2("nav",{className:"mobile-modes","aria-label":"Modo mobile"},[["vault","Vault"],["note","Nota"],["graph","Grafo"],["activity","Atividade"]].map(function(x){return h2("button",{"data-mobile-mode":x[0],className:mobileMode===x[0]?"active":"",onClick:function(){setMobileMode(x[0])}},x[1])})),
-      h2("div",{className:"preset-bar","aria-label":"Presets do grafo"},[
-        ["all","Tudo"],["brain","Brain"],["vault","Vault"],["projects","Projetos"],["recent","Recentes"],["hubs","Hubs"],["orphans","Órfãos"],["broken","Links quebrados"]
+      error&&snapshot?h2("div",{className:"stale-banner",role:"status"},"Refresh failed. Keeping the last valid snapshot. ",h2("button",{onClick:refresh},"Try again")):null,
+      h2("nav",{className:"mobile-modes","aria-label":"Mobile mode"},[["vault","Vault"],["note","Note"],["graph","Graph"],["activity","Activity"]].map(function(x){return h2("button",{"data-mobile-mode":x[0],className:mobileMode===x[0]?"active":"",onClick:function(){setMobileMode(x[0])}},x[1])})),
+      h2("div",{className:"preset-bar","aria-label":"Graph presets"},[
+        ["all","All"],["brain","Brain"],["vault","Vault"],["projects","Projects"],["recent","Recent"],["hubs","Hubs"],["orphans","Orphans"],["broken","Broken links"]
       ].map(function(x){return h2("button",{"data-preset":x[0],className:"preset-btn"+(preset===x[0]?" active":""),onClick:function(){applyPreset(x[0])}},x[1])}),
-        activeArea?h2("button",{className:"active-area-chip","data-active-area":activeArea,onClick:function(){setActiveArea(null)},"aria-label":"Remover filtro de área"},areaLabel(activeArea)+" ×"):null,
+        activeArea?h2("button",{className:"active-area-chip","data-active-area":activeArea,onClick:function(){setActiveArea(null)},"aria-label":"Remove area filter"},areaLabel(activeArea)+" ×"):null,
         h2("button",{className:"preset-btn views-toggle","data-action":"toggle-views","aria-expanded":viewsOpen,onClick:function(){setViewsOpen(!viewsOpen)}},"Views"),
-        h2("span",{"data-ghost-count":ghostCount,className:"ghost-count"},ghostCount?ghostCount+" relacionados fora do filtro":"sem ghost links")
+        h2("span",{"data-ghost-count":ghostCount,className:"ghost-count"},ghostCount?ghostCount+" related outside the filter":"no ghost links")
       ),
       h2("div",{className:"main-area"},
-        h2("aside",{className:"sidebar","data-mobile-surface":"vault","aria-label":"Explorador do vault"},
-          h2("div",{className:"pane-head"},h2("span",null,"// VAULT"),h2("button",{className:"pane-action",title:"Recolher explorador do vault","data-collapse-pane":"explorer",onClick:function(){setPaneCollapsed("explorer")},"aria-label":"Recolher explorador"},uiIcon("left",13))),
-          h2("div",{className:"sidebar-count","data-visible-count":true},baseNodes.length+" "+(baseNodes.length===1?"nota visível":"notas visíveis")),
-          h2("label",{className:"sort-label"},"Ordenar",
+        h2("aside",{className:"sidebar","data-mobile-surface":"vault","aria-label":"Vault explorer"},
+          h2("div",{className:"pane-head"},h2("span",null,"// VAULT"),h2("button",{className:"pane-action",title:"Collapse vault explorer","data-collapse-pane":"explorer",onClick:function(){setPaneCollapsed("explorer")},"aria-label":"Collapse explorer"},uiIcon("left",13))),
+          h2("div",{className:"sidebar-count","data-visible-count":true},baseNodes.length+" "+(baseNodes.length===1?"visible note":"visible notes")),
+          h2("label",{className:"sort-label"},"Sort",
             h2("select",{value:sortBy,onChange:function(e){setSortBy(e.target.value)}},
-              [["name","Nome"],["modified","Modificada"],["area","Área"],["degree","Grau"]].map(function(x){
+              [["name","Name"],["modified","Modified"],["area","Area"],["degree","Degree"]].map(function(x){
                 return h2("option",{value:x[0]},x[1]);
               })
             )
           ),
-          h2("div",{className:"explorer-progress explorer-summary","data-explorer-progress":"summary"},"Filtro: "+baseNodes.length+" de "+allNodes.length+" notas"),
+          h2("div",{className:"explorer-progress explorer-summary","data-explorer-progress":"summary"},"Filter: "+baseNodes.length+" of "+allNodes.length+" notes"),
           groupOrder.filter(function(g){return groups[g]&&groups[g].length}).map(function(g){var items=sorted(groups[g]),limit=shown[g]||20,isOpen=!!expanded[g];return h2("section",{className:"folder-group",key:g},
             h2("div",{className:"folder-row"},
-              h2("button",{className:"folder-arrow"+(isOpen?" open":""),onClick:function(){var n=Object.assign({},expanded);n[g]=!n[g];setExpanded(n)},"aria-label":(isOpen?"Recolher ":"Expandir ")+areaLabel(g),"aria-expanded":isOpen},"▸"),
+              h2("button",{className:"folder-arrow"+(isOpen?" open":""),onClick:function(){var n=Object.assign({},expanded);n[g]=!n[g];setExpanded(n)},"aria-label":(isOpen?"Collapse ":"Expand ")+areaLabel(g),"aria-expanded":isOpen},"▸"),
               h2("button",{className:"folder-label"+(activeArea===g?" active":""),"data-area-filter":g,onClick:function(){setActiveArea(activeArea===g?null:g);setPreset("all");var n=Object.assign({},expanded);n[g]=true;setExpanded(n)}},h2("span",{className:g==="brain"?"dot-brain":areaDotClass(g)}),h2("span",{className:"folder-name"},areaLabel(g)),h2("span",{className:"folder-count"},items.length))
             ),
             isOpen?h2("div",{className:"folder-children"},items.slice(0,limit).map(function(n){return h2("button",{className:"file-item child"+(selectedId===n.id?" active":""),"data-node-id":n.id,onClick:function(){navigateToNode(n,{keepArea:true})}},h2("span",{className:n.layer==="brain"?"dot-"+n.kind:areaDotClass(n.area)}),h2("span",null,trunc(cleanLabel(n.label),30)))}),
-              h2("div",{className:"explorer-progress","data-explorer-progress":g},Math.min(limit,items.length)+" de "+items.length),
-              limit<items.length?h2("button",{className:"show-more",onClick:function(){var next=Object.assign({},shown);next[g]=limit+28;setShown(next)}},"Mostrar mais"):null
+              h2("div",{className:"explorer-progress","data-explorer-progress":g},Math.min(limit,items.length)+" of "+items.length),
+              limit<items.length?h2("button",{className:"show-more",onClick:function(){var next=Object.assign({},shown);next[g]=limit+28;setShown(next)}},"Show more"):null
             ):null
           )}),
-          !baseNodes.length?h2("div",{className:"filter-empty"},h2("strong",null,"Nenhuma nota combina"),h2("p",null,"Os filtros atuais são incompatíveis."),h2("button",{onClick:clearFilters},"Limpar filtros")):null,
+          !baseNodes.length?h2("div",{className:"filter-empty"},h2("strong",null,"No notes match"),h2("p",null,"The current filters are incompatible."),h2("button",{onClick:clearFilters},"Clear filters")):null,
           h2("div",{className:"sidebar-section"},
-            h2("div",{className:"sidebar-title"},"// Camadas"),
+            h2("div",{className:"sidebar-title"},"// Layers"),
             h2("div",{className:"filter-chips"},["all","brain","vault","preference","signal"].map(function(f){
               return h2("button",{
                 "data-layer-filter":f,
@@ -892,63 +892,63 @@
                   if(f==="all")clearFilters();
                   else{setLayerFilter(f);setPreset("all");setActiveArea(f==="brain"?"brain":null);}
                 }
-              },f==="all"?"Tudo":kindLabel(f));
+              },f==="all"?"All":kindLabel(f));
             }))
           ),
           h2("div",{className:"stat-grid"},[[counts.preferences,"Prefs"],[counts.inbox,"Inbox"],[counts.logs,"Logs"],[counts.hermes_memory,"Mem"]].map(function(x){return h2("div",{className:"stat-item"},h2("span",{className:"stat-val"},fmt(x[0]||0)),h2("span",{className:"stat-lbl"},x[1]))}))
         ),
         h2("div",{className:"workspace"},
           h2("div",{className:"workspace-top"},
-            h2("section",{className:"note-pane","data-mobile-surface":"note","aria-label":"Inspetor da nota"},
-              h2("div",{className:"pane-head"},h2("span",null,"// INSPECTOR"),h2("button",{className:"pane-action",title:"Recolher inspetor da nota","data-collapse-pane":"inspector",onClick:function(){setPaneCollapsed("inspector")},"aria-label":"Recolher inspetor"},uiIcon("left",13))),
+            h2("section",{className:"note-pane","data-mobile-surface":"note","aria-label":"Note inspector"},
+              h2("div",{className:"pane-head"},h2("span",null,"// INSPECTOR"),h2("button",{className:"pane-action",title:"Collapse note inspector","data-collapse-pane":"inspector",onClick:function(){setPaneCollapsed("inspector")},"aria-label":"Collapse inspector"},uiIcon("left",13))),
               selected?[
-                h2("div",{className:"inspector-toolbar"},h2("div",{className:"segmented",role:"tablist"},[["rendered","Renderizado"],["source","Fonte"]].map(function(x){return h2("button",{"data-inspector-mode":x[0],className:inspectorMode===x[0]?"active":"",onClick:function(){setInspectorMode(x[0])}},x[1])})),
-                  h2("button",{className:"icon-action",title:"Copiar caminho",onClick:function(){copyText(selected.id,"Caminho")},"aria-label":"Copiar caminho da nota"},uiIcon("copy",13)),h2("button",{className:"icon-action",title:"Copiar wikilink",onClick:function(){copyText("[["+selected.id.replace(/\.md$/,"")+"]]","Wikilink")},"aria-label":"Copiar wikilink"},uiIcon("link",13))),
+                h2("div",{className:"inspector-toolbar"},h2("div",{className:"segmented",role:"tablist"},[["rendered","Rendered"],["source","Source"]].map(function(x){return h2("button",{"data-inspector-mode":x[0],className:inspectorMode===x[0]?"active":"",onClick:function(){setInspectorMode(x[0])}},x[1])})),
+                  h2("button",{className:"icon-action",title:"Copy path",onClick:function(){copyText(selected.id,"Path")},"aria-label":"Copy note path"},uiIcon("copy",13)),h2("button",{className:"icon-action",title:"Copy wikilink",onClick:function(){copyText("[["+selected.id.replace(/\.md$/,"")+"]]","Wikilink")},"aria-label":"Copy wikilink"},uiIcon("link",13))),
                 copyStatus?h2("div",{className:"copy-status",role:"status"},copyStatus):null,
                 h2("h1",{className:"note-title"},cleanLabel(selected.label)),
                 h2("div",{className:"properties-block"},[
-                  ["tipo",kindLabel(selected.layer==="vault"?"vault":selected.kind)],["área",areaLabel(selected.area||"brain")],["id",selected.id],["modificada",selected.modified_at?new Date(selected.modified_at).toLocaleString():"—"],["tamanho",fmt(selected.size_bytes||0)+" B"],["grau",fmt(selected.degree||0)],["backlinks",fmt(selected.incoming||backlinks.length)]
+                  ["type",kindLabel(selected.layer==="vault"?"vault":selected.kind)],["area",areaLabel(selected.area||"brain")],["id",selected.id],["modified",selected.modified_at?new Date(selected.modified_at).toLocaleString():"—"],["size",fmt(selected.size_bytes||0)+" B"],["degree",fmt(selected.degree||0)],["backlinks",fmt(selected.incoming||backlinks.length)]
                 ].map(function(x){return h2("div",{className:"prop-row"},h2("span",{className:"prop-key"},x[0]+":"),h2("span",{className:x[0]==="id"?"prop-path":""},x[1]))})),
                 h2("div",{className:"note-content"},inspectorMode==="source"?h2("pre",{className:"note-preview-text"},selected.preview||""):h2("div",{className:"markdown-rendered"},markdownNodes(selected.preview||""))),
-                obsidianLink(provider,selected)?h2("a",{className:"obsidian-action",href:obsidianLink(provider,selected)},"Abrir no Obsidian"):null,
-                h2("div",{className:"backlinks-section"},h2("div",{className:"backlinks-title"},"Backlinks ("+backlinks.length+")"),backlinks.length?backlinks.map(function(r){return h2("button",{className:"backlink-item",onClick:function(){navigateToNode(r.node)}},h2("span",{className:r.node.layer==="brain"?"dot-"+r.node.kind:areaDotClass(r.node.area)}),h2("span",{className:"backlink-label"},trunc(cleanLabel(r.node.label),34)),r.outside?h2("span",{className:"outside-badge"},"fora do filtro"):null)}):h2("p",{className:"no-backlinks"},"Sem backlinks."))
-              ]:h2("div",{className:"empty-note"},"Selecione uma nota.")
+                obsidianLink(provider,selected)?h2("a",{className:"obsidian-action",href:obsidianLink(provider,selected)},"Open in Obsidian"):null,
+                h2("div",{className:"backlinks-section"},h2("div",{className:"backlinks-title"},"Backlinks ("+backlinks.length+")"),backlinks.length?backlinks.map(function(r){return h2("button",{className:"backlink-item",onClick:function(){navigateToNode(r.node)}},h2("span",{className:r.node.layer==="brain"?"dot-"+r.node.kind:areaDotClass(r.node.area)}),h2("span",{className:"backlink-label"},trunc(cleanLabel(r.node.label),34)),r.outside?h2("span",{className:"outside-badge"},"outside filter"):null)}):h2("p",{className:"no-backlinks"},"No backlinks."))
+              ]:h2("div",{className:"empty-note"},"Select a note.")
             ),
-            h2("div",{className:"splitter splitter-vertical",role:"separator","aria-label":"Redimensionar inspetor","aria-orientation":"vertical",tabIndex:0,onPointerDown:function(e){beginSplitter(e,"x",noteWidth,function(v,live){var app=document.querySelector(".osb-app");if(app)app.style.setProperty("--note-width",v+"px");if(!live){SESSION_STATE.noteWidth=v;setNoteWidth(v)}},260,520)}}),
+            h2("div",{className:"splitter splitter-vertical",role:"separator","aria-label":"Resize inspector","aria-orientation":"vertical",tabIndex:0,onPointerDown:function(e){beginSplitter(e,"x",noteWidth,function(v,live){var app=document.querySelector(".osb-app");if(app)app.style.setProperty("--note-width",v+"px");if(!live){SESSION_STATE.noteWidth=v;setNoteWidth(v)}},260,520)}}),
             h2("section",{className:"graph-surface","data-mobile-surface":"graph"},
               h2("div",{className:"graph-toolbar"},
-                h2("div",{className:"focus-switch","data-focus-depth":focusDepth,"aria-label":"Profundidade das conexões"},[
-                  {d:0,label:"Visão geral",count:baseNodes.length,title:"Todas as notas do filtro atual"},
-                  {d:1,label:"1 salto",count:hop1Count,title:"Nota selecionada e vizinhos diretos",disabled:!selected||hop1Count<=1},
-                  {d:2,label:"2 saltos",count:hop2Count,title:"Vizinhos diretos e conexões dos vizinhos"+(hop2Outside?" · "+hop2Outside+" fora do filtro":""),disabled:!selected||hop2Count<=hop1Count}
+                h2("div",{className:"focus-switch","data-focus-depth":focusDepth,"aria-label":"Connection depth"},[
+                  {d:0,label:"Overview",count:baseNodes.length,title:"All notes in the current filter"},
+                  {d:1,label:"1 hop",count:hop1Count,title:"Selected note and direct neighbors",disabled:!selected||hop1Count<=1},
+                  {d:2,label:"2 hops",count:hop2Count,title:"Direct neighbors and their connections"+(hop2Outside?" · "+hop2Outside+" outside filter":""),disabled:!selected||hop2Count<=hop1Count}
                 ].map(function(item){return h2("button",{className:focusDepth===item.d?"active":"",title:item.title,onClick:function(){setFocusDepth(item.d)},disabled:!!item.disabled,"data-focus-count":item.count,"data-focus-option":item.d},h2("span",null,item.label),h2("span",{className:"focus-count"},fmt(item.count)))})),
-                h2("div",{className:"dimension-switch",role:"group","aria-label":"Dimensão do grafo"},
-                  h2("button",{className:graphDimension==="2d"?"active":"","data-graph-dimension":"2d","aria-pressed":graphDimension==="2d",title:"Grafo 2D clássico",onClick:function(){changeGraphDimension("2d")}},"2D"),
-                  graph3dEnabled?h2("button",{className:graphDimension==="3d"?"active":"","data-graph-dimension":"3d","aria-pressed":graphDimension==="3d",title:"Universo 3D orbital",onClick:function(){changeGraphDimension("3d")}},"3D"):null
+                h2("div",{className:"dimension-switch",role:"group","aria-label":"Graph dimension"},
+                  h2("button",{className:graphDimension==="2d"?"active":"","data-graph-dimension":"2d","aria-pressed":graphDimension==="2d",title:"Classic 2D graph",onClick:function(){changeGraphDimension("2d")}},"2D"),
+                  graph3dEnabled?h2("button",{className:graphDimension==="3d"?"active":"","data-graph-dimension":"3d","aria-pressed":graphDimension==="3d",title:"Orbital 3D universe",onClick:function(){changeGraphDimension("3d")}},"3D"):null
                 ),
                 h2("div",{className:"toolbar-actions"},
-                  h2("button",{className:"toolbar-btn",title:graphMax?"Voltar aos painéis":"Ocultar Vault, inspetor e atividade para ampliar o grafo","aria-label":graphMax?"Sair do modo expandido":"Expandir grafo","aria-pressed":graphMax,onClick:function(){setGraphMax(!graphMax)}},uiIcon("frame",13),h2("span",{className:"toolbar-label"},graphMax?"Sair do modo expandido":"Expandir grafo")),
-                  !graphMax?h2("button",{className:"toolbar-btn",title:collapsed.activity?"Reabrir o painel de atividade":"Ocultar o painel de atividade","aria-label":collapsed.activity?"Mostrar atividade":"Ocultar atividade",onClick:function(){setPaneCollapsed("activity")}},uiIcon(collapsed.activity?"up":"down",13),h2("span",{className:"toolbar-label"},collapsed.activity?"Mostrar atividade":"Ocultar atividade")):null,
-                  h2("button",{className:"toolbar-btn",title:"Reabrir painéis e voltar aos tamanhos padrão","aria-label":"Redefinir painéis",onClick:restoreLayout},uiIcon("reset",13),h2("span",{className:"toolbar-label"},"Redefinir painéis"))
+                  h2("button",{className:"toolbar-btn",title:graphMax?"Return to panels":"Hide Vault, inspector, and activity to expand the graph","aria-label":graphMax?"Exit expanded mode":"Expand graph","aria-pressed":graphMax,onClick:function(){setGraphMax(!graphMax)}},uiIcon("frame",13),h2("span",{className:"toolbar-label"},graphMax?"Exit expanded mode":"Expand graph")),
+                  !graphMax?h2("button",{className:"toolbar-btn",title:collapsed.activity?"Reopen activity panel":"Hide activity panel","aria-label":collapsed.activity?"Show activity":"Hide activity",onClick:function(){setPaneCollapsed("activity")}},uiIcon(collapsed.activity?"up":"down",13),h2("span",{className:"toolbar-label"},collapsed.activity?"Show activity":"Hide activity")):null,
+                  h2("button",{className:"toolbar-btn",title:"Reopen panels and restore default sizes","aria-label":"Reset panels",onClick:restoreLayout},uiIcon("reset",13),h2("span",{className:"toolbar-label"},"Reset panels"))
                 )
               ),
               graphDimension==="3d"?h2(GraphCanvas3D,{nodes:graphNodes,edges:graphEdges,selected:selected,onSelect:function(n){navigateToNode(nodeMap[n.id]||n,{focus:focusDepth})}}):h2(GraphCanvas,{nodes:graphNodes,edges:graphEdges,selected:selected,onSelect:function(n){navigateToNode(nodeMap[n.id]||n,{focus:focusDepth})}}),
-              h2("div",{className:"graph-list","data-graph-list":true,"aria-label":"Lista equivalente do grafo"},graphNodes.slice(0,120).map(function(n){return h2("button",{"data-node-id":n.id,onClick:function(){navigateToNode(nodeMap[n.id]||n)}},n.label)}))
+              h2("div",{className:"graph-list","data-graph-list":true,"aria-label":"Equivalent graph list"},graphNodes.slice(0,120).map(function(n){return h2("button",{"data-node-id":n.id,onClick:function(){navigateToNode(nodeMap[n.id]||n)}},n.label)}))
             )
           ),
-          h2("div",{className:"splitter splitter-horizontal",role:"separator","aria-label":"Redimensionar atividade","aria-orientation":"horizontal",tabIndex:0,onPointerDown:function(e){beginSplitter(e,"y",activityHeight,function(v,live){var app=document.querySelector(".osb-app");if(app)app.style.setProperty("--activity-height",v+"px");if(!live){SESSION_STATE.activityHeight=v;setActivityHeight(v)}},220,430)}}),
+          h2("div",{className:"splitter splitter-horizontal",role:"separator","aria-label":"Resize activity","aria-orientation":"horizontal",tabIndex:0,onPointerDown:function(e){beginSplitter(e,"y",activityHeight,function(v,live){var app=document.querySelector(".osb-app");if(app)app.style.setProperty("--activity-height",v+"px");if(!live){SESSION_STATE.activityHeight=v;setActivityHeight(v)}},220,430)}}),
           h2(BottomPanel,{snapshot:snapshot,selected:selected,nodeMap:nodeMap,onNavigate:navigateToNode,onCollapse:function(){setPaneCollapsed("activity")}})
         )
       ),
       h2("aside",{className:"views-drawer"+(viewsOpen?" open":""),"data-saved-views":true,"aria-hidden":viewsOpen?"false":"true"},
-        h2("div",{className:"views-head"},h2("strong",null,"Views & inteligência"),h2("button",{"data-action":"explain-cluster",onClick:function(){setClusterSummary(deterministicCluster(graphNodes))}},"Explicar cluster")),
-        h2("div",{className:"built-in-views"},[["focus","Meu foco atual"],["projects","Projetos ativos"],["memory","Memórias novas"],["runbooks","Runbooks relacionados"],["orphans","Notas sem conexão"]].map(function(x){return h2("button",{onClick:function(){builtInView(x[0])}},x[1])})),
-        h2("div",{className:"save-view"},h2("input",{value:viewName,placeholder:"Nome da view",onChange:function(e){setViewName(e.target.value)},"aria-label":"Nome da view"}),h2("button",{onClick:saveView,disabled:!viewName.trim()},"Salvar")),
-        savedViews.map(function(v){return h2("div",{className:"saved-view-row"},h2("button",{onClick:function(){openView(v)}},v.name),h2("button",{onClick:function(){removeView(v.id)},"aria-label":"Remover "+v.name},"×"))}),
+        h2("div",{className:"views-head"},h2("strong",null,"Views & intelligence"),h2("button",{"data-action":"explain-cluster",onClick:function(){setClusterSummary(deterministicCluster(graphNodes))}},"Explain cluster")),
+        h2("div",{className:"built-in-views"},[["focus","My current focus"],["projects","Active projects"],["memory","New memories"],["runbooks","Related runbooks"],["orphans","Unlinked notes"]].map(function(x){return h2("button",{onClick:function(){builtInView(x[0])}},x[1])})),
+        h2("div",{className:"save-view"},h2("input",{value:viewName,placeholder:"View name",onChange:function(e){setViewName(e.target.value)},"aria-label":"View name"}),h2("button",{onClick:saveView,disabled:!viewName.trim()},"Save")),
+        savedViews.map(function(v){return h2("div",{className:"saved-view-row"},h2("button",{onClick:function(){openView(v)}},v.name),h2("button",{onClick:function(){removeView(v.id)},"aria-label":"Remove "+v.name},"×"))}),
         clusterSummary?h2("p",{className:"cluster-summary",role:"status"},clusterSummary):null,
-        h2("small",null,"Resumo determinístico. Extensão futura: window.__OSB_CLUSTER_SUMMARIZER__; nenhuma API externa é chamada.")
+        h2("small",null,"Deterministic summary. Future extension: window.__OSB_CLUSTER_SUMMARIZER__; no external API is called.")
       ),
-      h2("div",{className:"status-bar"},h2("div",{className:"status-left"},h2("span",null,fmt(allNodes.length)+" notas"),h2("span",null,fmt(allEdges.length)+" links"),h2("span",null,fmt(baseNodes.length)+" visíveis"),h2("span",null,"rev "+trunc(snapshot&&snapshot.revision||"—",10))),h2("div",{className:"status-right"},h2("span",null,"read-only")))
+      h2("div",{className:"status-bar"},h2("div",{className:"status-left"},h2("span",null,fmt(allNodes.length)+" notes"),h2("span",null,fmt(allEdges.length)+" links"),h2("span",null,fmt(baseNodes.length)+" visible"),h2("span",null,"rev "+trunc(snapshot&&snapshot.revision||"—",10))),h2("div",{className:"status-right"},h2("span",null,"read-only")))
     );
   }
 

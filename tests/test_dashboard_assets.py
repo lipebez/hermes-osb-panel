@@ -176,28 +176,57 @@ class DashboardAssetTests(unittest.TestCase):
             self.assertNotIn(broken_selector, css)
         self.assertIn(".osb-app .views-drawer.open{display:block!important}", css)
 
-    def test_graph_controls_are_discoverable_and_focus_modes_explain_counts(self):
+    def test_graph_controls_are_discoverable_and_focus_modes_explain_counts_in_english(self):
         js = (ROOT / "dashboard" / "dist" / "index.js").read_text(encoding="utf-8")
-        self.assertIn("Enquadrar todos os nós", js)
-        self.assertIn("Focar a nota e conexões diretas", js)
+        self.assertIn("Fit all nodes", js)
+        self.assertIn("Focus selected note and direct connections", js)
+        self.assertNotIn("Enquadrar todos os nós", js)
+        self.assertNotIn("Focar a nota e conexões diretas", js)
         self.assertNotIn('\"data-graph-control\": \"overview\"', js)
         self.assertNotIn('}, \"FA\")', js)
         self.assertNotIn('}, \"FS\")', js)
         self.assertNotIn('}, \"OV\")', js)
         self.assertIn("focusNeighborhood", js)
         self.assertIn('\"data-focus-count\"', js)
-        self.assertIn("vizinhos diretos", js)
-        self.assertIn("Expandir grafo", js)
-        self.assertIn("Redefinir painéis", js)
+        self.assertIn("direct neighbors", js)
+        self.assertIn("Expand graph", js)
+        self.assertIn("Reset panels", js)
+
+    def test_ui_and_vault_area_labels_are_english(self):
+        js = (ROOT / "dashboard" / "dist" / "index.js").read_text(encoding="utf-8")
+        for label in (
+            'preference:"Preference"',
+            'signal:"Signal"',
+            'note:"Note"',
+            'projects:"Projects"',
+            'clients:"Clients"',
+            'decisions:"Decisions"',
+            'references:"References"',
+            'other:"Other"',
+            "Search notes and commands",
+            "Vault explorer",
+            "Deterministic summary",
+        ):
+            self.assertIn(label, js)
+
+        for legacy_label in (
+            'preference:"Preferência"',
+            'note:"Nota"',
+            'projects:"Projetos"',
+            'decisions:"Decisões"',
+            'references:"Referências"',
+            'other:"Outros"',
+        ):
+            self.assertNotIn(legacy_label, js)
 
     def test_inspector_copy_actions_use_icons_instead_of_abbreviations(self):
         js = (ROOT / "dashboard" / "dist" / "index.js").read_text(encoding="utf-8")
         self.assertIn('uiIcon("copy",13)', js)
         self.assertIn('uiIcon("link",13)', js)
-        self.assertIn('title:"Copiar caminho"', js)
-        self.assertIn('title:"Copiar wikilink"', js)
-        self.assertIn('"aria-label":"Copiar caminho da nota"', js)
-        self.assertIn('"aria-label":"Copiar wikilink"', js)
+        self.assertIn('title:"Copy path"', js)
+        self.assertIn('title:"Copy wikilink"', js)
+        self.assertIn('"aria-label":"Copy note path"', js)
+        self.assertIn('"aria-label":"Copy wikilink"', js)
         self.assertNotIn('},"CP")', js)
         self.assertNotIn('},"WL")', js)
 
