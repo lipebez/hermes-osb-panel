@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Fail closed unless an extracted tree has exactly the archive's paths."""
+"""Fail closed unless a link-free extracted tree matches archive paths."""
 
 from __future__ import annotations
 
 import argparse
 import os
+import stat
 import sys
 import tarfile
 from pathlib import Path, PurePosixPath
@@ -40,10 +41,20 @@ def _bounded_names(names: Iterable[str], max_entries: int) -> frozenset[str]:
 
 def _archive_names(archive: Path, max_entries: int) -> frozenset[str]:
     with tarfile.open(archive, mode="r:*") as handle:
-        return _bounded_names(
-            (_normalized_member_name(member.name) for member in handle),
-            max_entries,
-        )
+        def names() -> Iterable[str]:
+            for member in handle:
+                if member.issym() or member.islnk():
+                    raise ValueError("archive links are not permitted")
+                if not (member.isdir() or member.isfile()):
+                    raise ValueError("special archive entries are not permitted")
+                yield _normalized_member_name(member.name)
+
+        return _bounded_names(names(), max_entries)
+
+
+def validate_archive(archive: Path, *, max_entries: int = DEFAULT_MAX_ENTRIES) -> None:
+    """Reject unsafe names, duplicate paths, links, and excessive fanout."""
+    _archive_names(Path(archive), max_entries)
 
 
 def _tree_name_iter(root: Path) -> Iterable[str]:
@@ -51,12 +62,19 @@ def _tree_name_iter(root: Path) -> Iterable[str]:
     while stack:
         directory, relative_directory = stack.pop()
         with os.scandir(directory) as entries:
-            ordered = sorted(entries, key=lambda entry: os.fsencode(entry.name), reverse=True)
-        for entry in ordered:
-            relative = PurePosixPath(entry.name) if relative_directory is None else relative_directory / entry.name
-            yield relative.as_posix()
-            if entry.is_dir(follow_symlinks=False):
-                stack.append((Path(entry.path), relative))
+            for entry in entries:
+                if entry.is_symlink():
+                    raise ValueError("extracted links are not permitted")
+                metadata = entry.stat(follow_symlinks=False)
+                is_directory = stat.S_ISDIR(metadata.st_mode)
+                if not (is_directory or stat.S_ISREG(metadata.st_mode)):
+                    raise ValueError("special extracted entries are not permitted")
+                if not is_directory and metadata.st_nlink != 1:
+                    raise ValueError("extracted hard links are not permitted")
+                relative = PurePosixPath(entry.name) if relative_directory is None else relative_directory / entry.name
+                yield relative.as_posix()
+                if is_directory:
+                    stack.append((Path(entry.path), relative))
 
 
 def _tree_names(root: Path, max_entries: int) -> frozenset[str]:
@@ -66,7 +84,7 @@ def _tree_names(root: Path, max_entries: int) -> frozenset[str]:
 
 
 def check_parity(archive: Path, root: Path, *, max_entries: int = DEFAULT_MAX_ENTRIES) -> None:
-    """Check exact path-set parity without following extraction symlinks."""
+    """Check exact path-set parity and reject every symbolic or hard link."""
     if _archive_names(Path(archive), max_entries) != _tree_names(Path(root), max_entries):
         raise ValueError("archive/extraction path mismatch")
 
@@ -74,7 +92,11 @@ def check_parity(archive: Path, root: Path, *, max_entries: int = DEFAULT_MAX_EN
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--archive", required=True, type=Path)
-    parser.add_argument("--root", required=True, type=Path)
+    parser.add_argument(
+        "--root",
+        type=Path,
+        help="also compare this extracted root with the validated archive",
+    )
     parser.add_argument("--max-entries", type=int, default=DEFAULT_MAX_ENTRIES)
     return parser
 
@@ -82,7 +104,9 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     try:
         args = _parser().parse_args(argv)
-        check_parity(args.archive, args.root, max_entries=args.max_entries)
+        validate_archive(args.archive, max_entries=args.max_entries)
+        if args.root is not None:
+            check_parity(args.archive, args.root, max_entries=args.max_entries)
         return 0
     except (OSError, tarfile.TarError, ValueError):
         sys.stderr.write(_ERROR)

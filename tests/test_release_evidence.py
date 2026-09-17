@@ -67,6 +67,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
                 "candidate_sha": SHA,
                 "candidate_archive_sha256": ARCHIVE_SHA256,
                 "doctor_gate_passed": True,
+                "evidence_kind": "sanitized_operator_summary.v1",
                 "gates": {
                     "archive_passed": True,
                     "static_passed": True,
@@ -108,11 +109,29 @@ class ReleaseEvidenceTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     build_evidence(**values)
 
-    def test_requires_literal_true_doctor_gate(self):
-        for value in (False, 1, "true", None):
-            with self.subTest(value=value):
+    def test_requires_every_release_gate_to_be_literal_true(self):
+        for field in (
+            "static_gate_passed",
+            "unit_gate_passed",
+            "archive_gate_passed",
+            "doctor_gate_passed",
+        ):
+            for value in (False, 1, "true", None):
+                with self.subTest(field=field, value=value):
+                    values = safe_inputs()
+                    values[field] = value
+                    with self.assertRaises(ValueError):
+                        build_evidence(**values)
+
+    def test_summary_identifies_itself_as_operator_supplied_not_attestation(self):
+        evidence = build_evidence(**safe_inputs())
+        self.assertEqual(evidence["evidence_kind"], "sanitized_operator_summary.v1")
+
+    def test_false_static_or_archive_gate_is_rejected(self):
+        for field in ("static_gate_passed", "archive_gate_passed"):
+            with self.subTest(field=field):
                 values = safe_inputs()
-                values["doctor_gate_passed"] = value
+                values[field] = False
                 with self.assertRaises(ValueError):
                     build_evidence(**values)
 

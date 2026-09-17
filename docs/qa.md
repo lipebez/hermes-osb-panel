@@ -10,7 +10,7 @@ The shareable data source is only `tests/fixtures/demo_snapshot_v1.json` through
 
 ## Required exact-candidate gates
 
-Commit the intended candidate, then run this single Bash block from its clean repository root. Set `HERMES_AGENT_ROOT` to a clean Hermes Agent checkout at the validated commit whose own venv contains the `hermes` executable. The block aborts on every failed command or failed pipeline. It creates a disposable detached Git worktree for the exact candidate outside `/tmp`, creates exactly one read-only archive, and binds every gate and the evidence JSON to that archive's SHA-256:
+Commit the intended candidate, then run this single Bash block from its clean repository root with exclusive control of the repository and its sibling QA directory. Set `HERMES_AGENT_ROOT` to a clean Hermes Agent checkout at the validated commit whose own venv contains the `hermes` executable. The block aborts on every failed command or failed pipeline. It creates a disposable detached Git worktree for the exact candidate outside `/tmp`, creates one archive, and records that archive's SHA-256 in the sanitized operator summary. This procedure detects persistent drift before and after each gate; it is not a sandbox or a cryptographic defense against a hostile same-user process that mutates and restores files during a gate:
 
 ```bash
 HERMES_AGENT_ROOT=/path/to/hermes-agent-v0.21.3
@@ -26,17 +26,33 @@ git diff --quiet "$CANDIDATE_SHA" --
 git diff --cached --quiet
 
 QA_PARENT="$(dirname "$REPO_ROOT")"
-QA_CONTAINER="$(mktemp -d "$QA_PARENT/.hermes-osb-panel-release.XXXXXX")"
-QA_ROOT="$QA_CONTAINER/candidate-worktree"
-EVIDENCE_TMP_ROOT="$(mktemp -d /tmp/hermes-osb-panel-evidence.XXXXXX)"
+QA_CONTAINER=""
+QA_ROOT=""
+EVIDENCE_TMP_ROOT=""
 cleanup() {
   status=$?
-  git -C "$REPO_ROOT" worktree remove --force "$QA_ROOT" >/dev/null 2>&1 || true
-  git -C "$REPO_ROOT" worktree prune >/dev/null 2>&1 || true
-  rm -rf "$QA_CONTAINER" "$EVIDENCE_TMP_ROOT"
-  exit "$status"
+  set +e
+  cleanup_status=0
+  if [[ -n "$QA_ROOT" ]]; then
+    git -C "$REPO_ROOT" worktree remove --force "$QA_ROOT" >/dev/null 2>&1 || cleanup_status=1
+  fi
+  if [[ -n "$QA_CONTAINER" ]]; then
+    rm -rf -- "$QA_CONTAINER" || cleanup_status=1
+    [[ ! -e "$QA_CONTAINER" ]] || cleanup_status=1
+  fi
+  if [[ -n "$EVIDENCE_TMP_ROOT" ]]; then
+    rm -rf -- "$EVIDENCE_TMP_ROOT" || cleanup_status=1
+    [[ ! -e "$EVIDENCE_TMP_ROOT" ]] || cleanup_status=1
+  fi
+  if ((status != 0)); then
+    exit "$status"
+  fi
+  exit "$cleanup_status"
 }
+QA_CONTAINER="$(mktemp -d "$QA_PARENT/.hermes-osb-panel-release.XXXXXX")"
 trap cleanup EXIT
+QA_ROOT="$QA_CONTAINER/candidate-worktree"
+EVIDENCE_TMP_ROOT="$(mktemp -d /tmp/hermes-osb-panel-evidence.XXXXXX)"
 git -C "$REPO_ROOT" worktree add --detach "$QA_ROOT" "$CANDIDATE_SHA"
 
 ARCHIVE_ROOT="$QA_CONTAINER/extracted-source"
@@ -56,6 +72,10 @@ assert_candidate_worktree() {
   git -C "$QA_ROOT" diff --cached --quiet
 }
 assert_archive_digest() {
+  test -f "$CANDIDATE_ARCHIVE"
+  test ! -L "$CANDIDATE_ARCHIVE"
+  test "$(stat -c '%a' "$CANDIDATE_ARCHIVE")" = 444
+  test "$(stat -c '%h' "$CANDIDATE_ARCHIVE")" = 1
   test "$(sha256sum "$CANDIDATE_ARCHIVE" | cut -d ' ' -f 1)" = "$CANDIDATE_ARCHIVE_SHA256"
 }
 assert_archive_parity() {
@@ -106,6 +126,8 @@ ARCHIVE_GATE_PASSED=true
 
 assert_archive_digest
 mkdir -p "$ARCHIVE_ROOT"
+PYTHONDONTWRITEBYTECODE=1 python3 -B "$QA_ROOT/scripts/check_archive_parity.py" \
+  --archive "$CANDIDATE_ARCHIVE"
 tar -xf "$CANDIDATE_ARCHIVE" -C "$ARCHIVE_ROOT"
 assert_archive_digest
 assert_archive_parity
@@ -122,6 +144,7 @@ HOME="$QA_HOME" HERMES_HOME="$QA_HOME/hermes" \
 DOCTOR_GATE_PASSED=true
 assert_archive_digest
 assert_archive_parity
+assert_archive_digest
 
 PYTHONDONTWRITEBYTECODE=1 python3 -B "$QA_ROOT/scripts/build_release_evidence.py" \
   --project-version 3.1.0 \
@@ -150,7 +173,7 @@ python3 -B -m json.tool "$EVIDENCE_OUTPUT"
 
 Node syntax, tracked-file AST parsing, and the complete current suite run only in the disposable detached worktree. Its sibling location under the repository parent preserves the three path-sensitive contracts: a real Git object database and exact `HEAD`, repository `.gitignore` semantics, and a repository root outside `/tmp`. Exact-HEAD, status, unstaged-diff, and staged-diff checks run immediately before and after each Node, AST, and suite gate. The canonical checkout is required clean before worktree creation and checked again after all gates.
 
-The scanner consumes the single read-only tar directly. Its SHA-256 is checked before and after scanning, extraction, and Doctor. GNU tar compares archive contents with the extracted tree before and after Doctor; the bounded parity helper independently rejects extra paths without following symlinked directories. Thus the scanner and Doctor are attributable to the same immutable bytes. Test and gate values become true only after their commands pass, and the evidence records the candidate SHA, archive SHA-256, and explicit Doctor success. The EXIT trap preserves the original status while removing the registered worktree, worktree metadata, sibling QA container, `/tmp` evidence directory, logs, archive, extraction, and isolated Hermes home on success or failure.
+The scanner consumes the single tar directly. Its regular-file type, link count, read-only mode, and SHA-256 are checked before and after scanning, extraction, and Doctor. Before extraction, the bounded helper rejects duplicate or unsafe paths, symbolic links, hard links, special entries, and excessive fanout. GNU tar checks content/type/mode parity, while the helper rejects extra paths, symbolic links, hard-linked regular files, and special extracted entries before and after Doctor. These checks establish stable candidate/archive identity for an operator-controlled run; they do not make pathnames immutable against a hostile concurrent process with the same privileges. Test and gate values become true only after their commands pass, and the summary records the candidate SHA, archive SHA-256, and explicit Doctor success. The EXIT trap preserves the original failing status, attempts every cleanup step, and reports cleanup failure after a successful run; it removes the registered worktree, sibling QA container, `/tmp` evidence directory, logs, archive, extraction, and isolated Hermes home.
 
 ## Isolated clean-install harness
 
@@ -207,7 +230,7 @@ Do not commit, attach, upload, or retain CDP output in the repository. Real-vaul
 
 ## Sanitized release-evidence summary
 
-The exact-candidate block builds the aggregate only after Node, AST, the complete suite, archive scanning, archive/extraction parity, and Hermes Doctor have succeeded. The builder requires the lowercase 64-hex candidate archive SHA-256 and literal Doctor success in addition to semantic versions, immutable commit SHAs, gate booleans, and consistent non-negative test counts. It does not itself inspect Git, environment variables, host state, secrets, screenshots, reports, or raw logs. The JSON has a fixed schema and canonical key ordering, so identical inputs produce identical bytes. Only its safe aggregate facts may be copied into release notes.
+The exact-candidate block builds the aggregate only after Node, AST, the complete suite, archive scanning, archive/extraction parity, and Hermes Doctor have succeeded. The builder rejects any false gate, requires the lowercase 64-hex candidate archive SHA-256, and emits `evidence_kind: sanitized_operator_summary.v1`. It does not inspect Git, recompute the digest, authenticate the operator, or read logs; therefore the JSON is a deterministic sanitized summary of explicit operator-supplied results, not a signature or independent attestation. Its safe aggregate facts may be copied into release notes only together with the reviewed workflow context.
 
 ## Archive-only public release scanner
 

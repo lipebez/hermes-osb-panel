@@ -130,7 +130,7 @@ See [`docs/architecture.md`](docs/architecture.md) for the contract and threat b
 
 ## Local verification
 
-Use the single fail-fast exact-archive procedure in [`docs/qa.md`](docs/qa.md). It verifies a clean candidate in a disposable detached worktree outside `/tmp`, creates one read-only `git archive` for its full SHA, and runs Node syntax, Python AST, the complete suite, public-release scanning, extraction-parity checks, the exact Hermes Doctor, and deterministic evidence generation. The evidence explicitly records the candidate SHA, archive SHA-256, and Doctor success. Its temporary `HOME`/`HERMES_HOME` keeps Doctor away from active profiles. A pass validates that commit only; it does not create or imply a tag or GitHub Release.
+Use the single fail-fast exact-archive procedure in [`docs/qa.md`](docs/qa.md). Run it with exclusive operator control of the repository and QA directory. It verifies a clean candidate in a disposable detached worktree outside `/tmp`, creates one read-only `git archive` for its full SHA, and runs Node syntax, Python AST, the complete suite, public-release scanning, extraction-parity checks, the exact Hermes Doctor, and deterministic summary generation. The resulting `sanitized_operator_summary.v1` records operator-supplied candidate SHA, archive SHA-256, and gate results; it is not a signature or independent attestation. Its temporary `HOME`/`HERMES_HOME` keeps Doctor away from active profiles. A pass validates that commit only; it does not create or imply a tag or GitHub Release.
 
 ## Contributing and license
 

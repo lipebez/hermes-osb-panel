@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a deterministic, sanitized release-evidence summary.
+"""Build a deterministic, sanitized operator-supplied release summary.
 
 All evidence is supplied explicitly. This module does not inspect Git, the
 repository, environment variables, host state, QA artifacts, or raw logs.
@@ -97,13 +97,14 @@ def build_evidence(
         raise ValueError("inconsistent test counts")
     if unit_passed != (failed == 0):
         raise ValueError("unit gate contradicts test counts")
-    if doctor_passed is not True:
-        raise ValueError("doctor gate did not pass")
+    if not all((static_passed, unit_passed, archive_passed, doctor_passed)):
+        raise ValueError("release gate did not pass")
 
     return {
         "candidate_archive_sha256": archive_sha256,
         "candidate_sha": candidate,
         "doctor_gate_passed": doctor_passed,
+        "evidence_kind": "sanitized_operator_summary.v1",
         "gates": {
             "archive_passed": archive_passed,
             "static_passed": static_passed,
