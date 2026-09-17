@@ -8,6 +8,7 @@ import sys
 import tempfile
 import tomllib
 import unittest
+import urllib.request
 from pathlib import Path
 from unittest.mock import patch
 
@@ -18,6 +19,38 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class DashboardAssetTests(unittest.TestCase):
+    def test_fixture_server_serves_only_explicit_installed_asset_bytes(self):
+        fixture = ROOT / "tests" / "fixtures" / "demo_snapshot_v1.json"
+        checkout_js = (ROOT / "dashboard" / "dist" / "index.js").read_bytes()
+        with tempfile.TemporaryDirectory() as temporary:
+            assets = Path(temporary) / "installed" / "dist"
+            assets.mkdir(parents=True)
+            installed_js = b"window.__B2A_INSTALLED_ASSET__ = true;"
+            installed_css = b".installed-b2a-canary{display:block}"
+            self.assertNotEqual(installed_js, checkout_js)
+            (assets / "index.js").write_bytes(installed_js)
+            (assets / "style.css").write_bytes(installed_css)
+            with qa_dashboard_cdp.demo_server(fixture, assets) as url:
+                origin = url.rsplit("/", 1)[0]
+                self.assertEqual(urllib.request.urlopen(origin + "/assets/index.js").read(), installed_js)
+                self.assertEqual(urllib.request.urlopen(origin + "/assets/style.css").read(), installed_css)
+
+    def test_fixture_asset_root_rejects_missing_symlink_and_missing_assets(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaises(argparse.ArgumentTypeError):
+                qa_dashboard_cdp.parse_asset_root(str(root / "absent"))
+            assets = root / "dist"
+            assets.mkdir()
+            (assets / "index.js").write_bytes(b"js")
+            with self.assertRaises(argparse.ArgumentTypeError):
+                qa_dashboard_cdp.parse_asset_root(str(assets))
+            (assets / "style.css").write_bytes(b"css")
+            link = root / "linked-dist"
+            link.symlink_to(assets, target_is_directory=True)
+            with self.assertRaises(argparse.ArgumentTypeError):
+                qa_dashboard_cdp.parse_asset_root(str(link))
+            self.assertEqual(qa_dashboard_cdp.parse_asset_root(str(assets)), assets.resolve())
     def test_release_version_is_consistent_across_metadata_assets_and_docs(self):
         manifest = json.loads((ROOT / "dashboard" / "manifest.json").read_text(encoding="utf-8"))
         plugin_text = (ROOT / "plugin.yaml").read_text(encoding="utf-8")

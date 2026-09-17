@@ -11,6 +11,7 @@ import selectors
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -443,6 +444,98 @@ def _plugin_entry(payload: Any) -> dict[str, Any] | None:
     return None
 
 
+def _owned_install_path(hermes_home: Path, relative: Path, *, directory: bool) -> Path:
+    """Resolve an installed path without accepting symlinks or HOME escape."""
+    if relative.is_absolute() or not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+        raise QAFailure("installed plugin path was invalid")
+    try:
+        home = hermes_home.resolve(strict=True)
+        if stat.S_ISLNK(hermes_home.lstat().st_mode):
+            raise QAFailure("temporary HERMES_HOME must not be a symlink")
+        current = hermes_home
+        for part in relative.parts:
+            current = current / part
+            mode = current.lstat().st_mode
+            if stat.S_ISLNK(mode):
+                raise QAFailure("installed plugin path contained a symlink")
+        resolved = current.resolve(strict=True)
+        resolved.relative_to(home)
+    except QAFailure:
+        raise
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise QAFailure("installed plugin path was missing or escaped HERMES_HOME") from exc
+    mode = resolved.stat().st_mode
+    if (directory and not stat.S_ISDIR(mode)) or (not directory and not stat.S_ISREG(mode)):
+        raise QAFailure("installed plugin path had an unexpected type")
+    return resolved
+
+
+def _installed_asset_root(hermes_home: Path, repository: str, ref: str) -> Path:
+    """Derive and validate the pinned plugin's dist root from Hermes metadata."""
+    metadata_path = _owned_install_path(
+        hermes_home, Path("plugins") / ".install-metadata.json", directory=False,
+    )
+    try:
+        if metadata_path.stat().st_size > MAX_STATUS_RESPONSE_BYTES:
+            raise QAFailure("plugin install metadata exceeded the QA size limit")
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except QAFailure:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise QAFailure("plugin install metadata was invalid") from exc
+    expected_source = f"https://github.com/{repository}.git"
+    record = metadata.get(PLUGIN_ID) if isinstance(metadata, dict) else None
+    if not isinstance(record, dict) or record != {
+        "pinned": True, "revision": ref, "source": expected_source,
+    }:
+        raise QAFailure("plugin install metadata did not prove the requested pin")
+
+    plugin_root = _owned_install_path(hermes_home, Path("plugins") / PLUGIN_ID, directory=True)
+    plugin_manifest = _owned_install_path(
+        hermes_home, Path("plugins") / PLUGIN_ID / "plugin.yaml", directory=False,
+    )
+    try:
+        manifest_text = plugin_manifest.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise QAFailure("installed plugin manifest was invalid") from exc
+    names = re.findall(r"(?m)^name:\s*['\"]?([^'\"\s#]+)['\"]?\s*(?:#.*)?$", manifest_text)
+    if names != [PLUGIN_ID]:
+        raise QAFailure("installed plugin manifest identity did not match")
+
+    dashboard_manifest = _owned_install_path(
+        hermes_home, Path("plugins") / PLUGIN_ID / "dashboard" / "manifest.json", directory=False,
+    )
+    try:
+        if dashboard_manifest.stat().st_size > MAX_STATUS_RESPONSE_BYTES:
+            raise QAFailure("dashboard manifest exceeded the QA size limit")
+        dashboard = json.loads(dashboard_manifest.read_text(encoding="utf-8"))
+    except QAFailure:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise QAFailure("installed dashboard manifest was invalid") from exc
+    if not isinstance(dashboard, dict) or dashboard.get("name") != PLUGIN_ID:
+        raise QAFailure("installed dashboard manifest identity did not match")
+    entry = dashboard.get("entry")
+    css = dashboard.get("css")
+    css_path = css.split("?", 1)[0] if isinstance(css, str) else None
+    if entry != "dist/index.js" or css_path != "dist/style.css":
+        raise QAFailure("installed dashboard manifest assets were unexpected")
+
+    asset_root = _owned_install_path(
+        hermes_home, Path("plugins") / PLUGIN_ID / "dashboard" / "dist", directory=True,
+    )
+    for name in ("index.js", "style.css"):
+        asset = _owned_install_path(
+            hermes_home, Path("plugins") / PLUGIN_ID / "dashboard" / "dist" / name,
+            directory=False,
+        )
+        if asset.parent != asset_root:
+            raise QAFailure("installed dashboard asset escaped its dist root")
+    if plugin_root not in asset_root.parents:
+        raise QAFailure("installed dashboard assets escaped the plugin root")
+    return asset_root
+
+
 def _cli_plugin_active(payload: Any) -> bool:
     item = _plugin_entry(payload)
     if not item:
@@ -755,6 +848,7 @@ def run_clean_install(
             if not _cli_plugin_active(_list_plugins(runner, hermes_executable, env, operation_deadline, monotonic)):
                 raise QAFailure("installed plugin is not active")
             _run_checked(runner, [hermes_executable, "plugins", "show", PLUGIN_ID], env, operation_deadline, monotonic)
+            asset_root = _installed_asset_root(hermes_home, repository, ref)
             _run_checked(runner, [hermes_executable, "plugins", "doctor", PLUGIN_ID, "--ci"], env, operation_deadline, monotonic)
 
             last_start_error: QAFailure | None = None
@@ -817,6 +911,7 @@ def run_clean_install(
                 [python_executable, str(ROOT / "scripts" / "qa_dashboard_cdp.py"),
                  "--chromium", browser_executable, "--url", base_url + "/second-brain",
                  "--fixture", str(ROOT / "tests" / "fixtures" / "demo_snapshot_v1.json"),
+                 "--asset-root", str(asset_root),
                  "--output", str(cdp_output), "--inherit-runner-process-group"],
                 env=env, cwd=str(ROOT), stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

@@ -127,6 +127,23 @@ class Harness:
             return subprocess.CompletedProcess(command, 2, "", "private output")
         if command[1:3] == ["plugins", "install"]:
             self.installed = True
+            hermes_home = Path(kwargs["env"]["HERMES_HOME"])
+            plugin_root = hermes_home / "plugins" / PLUGIN
+            (plugin_root / "dashboard" / "dist").mkdir(parents=True)
+            (plugin_root / "plugin.yaml").write_text(
+                f'name: {PLUGIN}\nversion: "3.1.0"\nkind: dashboard\n', encoding="utf-8",
+            )
+            (plugin_root / "dashboard" / "manifest.json").write_text(json.dumps({
+                "name": PLUGIN, "entry": "dist/index.js", "css": "dist/style.css?v=3.1.0",
+            }), encoding="utf-8")
+            (plugin_root / "dashboard" / "dist" / "index.js").write_bytes(b"installed-js")
+            (plugin_root / "dashboard" / "dist" / "style.css").write_bytes(b"installed-css")
+            (hermes_home / "plugins" / ".install-metadata.json").write_text(json.dumps({
+                PLUGIN: {
+                    "pinned": True, "revision": SHA,
+                    "source": "https://github.com/owner/repo.git",
+                },
+            }), encoding="utf-8")
         elif command[1:3] == ["plugins", "remove"]:
             self.installed = False
         if command[1:4] == ["plugins", "list", "--json"]:
@@ -213,6 +230,57 @@ class Harness:
 
 
 class ValidationTests(unittest.TestCase):
+    def _installed_tree(self, root: Path) -> Path:
+        plugin = root / "plugins" / PLUGIN
+        (plugin / "dashboard" / "dist").mkdir(parents=True)
+        (root / "plugins" / ".install-metadata.json").write_text(json.dumps({
+            PLUGIN: {"pinned": True, "revision": SHA, "source": "https://github.com/owner/repo.git"},
+        }), encoding="utf-8")
+        (plugin / "plugin.yaml").write_text(f"name: {PLUGIN}\n", encoding="utf-8")
+        (plugin / "dashboard" / "manifest.json").write_text(json.dumps({
+            "name": PLUGIN, "entry": "dist/index.js", "css": "dist/style.css?v=3.1.0",
+        }), encoding="utf-8")
+        (plugin / "dashboard" / "dist" / "index.js").write_bytes(b"installed-js")
+        (plugin / "dashboard" / "dist" / "style.css").write_bytes(b"installed-css")
+        return plugin
+
+    def test_installed_asset_root_comes_from_pinned_metadata_and_manifests(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            plugin = self._installed_tree(home)
+            self.assertEqual(
+                qa._installed_asset_root(home, "owner/repo", SHA),
+                (plugin / "dashboard" / "dist").resolve(),
+            )
+
+    def test_installed_asset_root_rejects_absence_escape_symlink_and_missing_asset(self):
+        with tempfile.TemporaryDirectory() as temporary, tempfile.TemporaryDirectory() as outside:
+            home = Path(temporary)
+            with self.assertRaises(qa.QAFailure):
+                qa._installed_asset_root(home, "owner/repo", SHA)
+            with self.assertRaises(qa.QAFailure):
+                qa._owned_install_path(home, Path("..") / "outside", directory=True)
+
+            (home / "plugins").symlink_to(Path(outside), target_is_directory=True)
+            self._installed_tree(Path(outside).parent / Path(outside).name)
+            with self.assertRaises(qa.QAFailure):
+                qa._installed_asset_root(home, "owner/repo", SHA)
+
+        with tempfile.TemporaryDirectory() as temporary, tempfile.TemporaryDirectory() as outside:
+            home = Path(temporary)
+            plugin = self._installed_tree(home)
+            escaped = Path(outside)
+            (plugin / "dashboard" / "dist").rename(escaped / "dist")
+            (plugin / "dashboard" / "dist").symlink_to(escaped / "dist", target_is_directory=True)
+            with self.assertRaises(qa.QAFailure):
+                qa._installed_asset_root(home, "owner/repo", SHA)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            plugin = self._installed_tree(home)
+            (plugin / "dashboard" / "dist" / "style.css").unlink()
+            with self.assertRaises(qa.QAFailure):
+                qa._installed_asset_root(home, "owner/repo", SHA)
     def test_repo_and_ref_are_strict(self):
         self.assertEqual(qa.github_repo("Owner-1/repo.name"), "Owner-1/repo.name")
         self.assertEqual(qa.commit_sha(SHA), SHA)
@@ -477,6 +545,11 @@ class CleanInstallTests(unittest.TestCase):
         self.assertNotEqual(harness.popen_env["HOME"], os.environ.get("HOME"))
         self.assertTrue(Path(harness.popen_env["HOME"]).is_absolute())
         self.assertFalse(Path(harness.popen_env["HOME"]).exists())
+        cdp_argv = next(call for call in harness.calls if any(str(item).endswith("qa_dashboard_cdp.py") for item in call))
+        self.assertIn("--asset-root", cdp_argv)
+        asset_root = Path(cdp_argv[cdp_argv.index("--asset-root") + 1])
+        self.assertNotEqual(asset_root, qa.ROOT / "dashboard" / "dist")
+        self.assertIn("hermes-home/plugins/hermes-osb-panel/dashboard/dist", asset_root.as_posix())
 
     def test_contract_failures_still_stop_and_remove(self):
         cases = {

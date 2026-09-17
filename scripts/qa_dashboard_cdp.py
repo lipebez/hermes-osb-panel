@@ -15,6 +15,7 @@ import os
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -70,6 +71,29 @@ def parse_loopback_url(value: str) -> str:
     ):
         raise argparse.ArgumentTypeError("url must be an http(s) loopback URL without userinfo")
     return value
+
+
+def parse_asset_root(value: str) -> Path:
+    """Accept only a real, non-symlink dist directory with both fixture assets."""
+    path = Path(value)
+    if not path.is_absolute():
+        raise argparse.ArgumentTypeError("asset root must be absolute")
+    try:
+        if stat.S_ISLNK(path.lstat().st_mode):
+            raise argparse.ArgumentTypeError("asset root must not be a symlink")
+        resolved = path.resolve(strict=True)
+        if resolved != path.absolute() or not resolved.is_dir():
+            raise argparse.ArgumentTypeError("asset root must be a canonical directory")
+        for name in ("index.js", "style.css"):
+            asset = resolved / name
+            mode = asset.lstat().st_mode
+            if stat.S_ISLNK(mode) or not stat.S_ISREG(mode) or asset.resolve(strict=True).parent != resolved:
+                raise argparse.ArgumentTypeError("asset root contains an invalid dashboard asset")
+    except argparse.ArgumentTypeError:
+        raise
+    except (OSError, RuntimeError) as exc:
+        raise argparse.ArgumentTypeError("asset root or required dashboard asset is missing") from exc
+    return resolved
 
 
 def free_port() -> int:
@@ -138,10 +162,12 @@ def stop_inherited_process(process: Any, timeout: float = 6.0) -> None:
 
 
 @contextmanager
-def demo_server(fixture: Path):
-    """Serve source assets and one synthetic fixture without external effects."""
+def demo_server(fixture: Path, asset_root: Path):
+    """Serve explicit installed assets and one synthetic fixture."""
 
     payload = fixture.read_bytes()
+    javascript = (asset_root / "index.js").read_bytes()
+    stylesheet = (asset_root / "style.css").read_bytes()
     html = b"""<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><link rel='stylesheet' href='/assets/style.css'><style>html,body,#root,#root>div,main,main>div,main>div>div,#pluginPageContainer{height:100%;min-height:0;margin:0;overflow:hidden;display:flex;flex-direction:column}</style></head><body><div id='root'><div><header role='banner'>Host</header><main><div><div><div id='pluginPageContainer'></div></div></div></main></div></div><script src='/assets/index.js'></script></body></html>"""
 
     class Handler(BaseHTTPRequestHandler):
@@ -150,9 +176,9 @@ def demo_server(fixture: Path):
             if path == "/api/plugins/hermes-osb-panel/snapshot":
                 body, content_type = payload, "application/json"
             elif path == "/assets/index.js":
-                body, content_type = (ROOT / "dashboard/dist/index.js").read_bytes(), "text/javascript"
+                body, content_type = javascript, "text/javascript"
             elif path == "/assets/style.css":
-                body, content_type = (ROOT / "dashboard/dist/style.css").read_bytes(), "text/css"
+                body, content_type = stylesheet, "text/css"
             elif path in {"/", "/second-brain"}:
                 body, content_type = html, "text/html"
             else:
@@ -893,18 +919,24 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", required=True, type=parse_loopback_url)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--fixture", type=Path, help="serve this sanitized fixture with source assets for shareable demo QA")
+    parser.add_argument("--fixture", type=Path, help="serve this sanitized fixture with explicit installed assets")
+    parser.add_argument("--asset-root", type=parse_asset_root, help="validated dist root used with --fixture")
     parser.add_argument("--chromium", type=Path, help="pre-resolved Chromium executable")
     parser.add_argument("--inherit-runner-process-group", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--viewport", dest="viewports", action="append", type=parse_viewport, help="repeatable WIDTHxHEIGHT; defaults to 1440x900, 1024x768 and 390x844")
     args = parser.parse_args(argv)
+    if args.fixture and args.asset_root is None:
+        parser.error("--fixture requires --asset-root; checkout asset fallback is forbidden")
+    if args.asset_root is not None and not args.fixture:
+        parser.error("--asset-root requires --fixture")
     viewports = args.viewports or DEFAULT_VIEWPORTS
     args.output.mkdir(parents=True, exist_ok=True)
     chromium = str(args.chromium.resolve()) if args.chromium else (shutil.which("chromium") or shutil.which("chromium-browser"))
     if not chromium:
         raise SystemExit("Chromium not found; refusing to install a heavy dependency")
 
-    demo_context = demo_server(args.fixture) if args.fixture else None
+    asset_root: Path | None = args.asset_root
+    demo_context = demo_server(args.fixture, asset_root) if args.fixture and asset_root is not None else None
     run_url = demo_context.__enter__() if demo_context else args.url
     port = free_port()
     runner_pgid = os.getpgrp()
