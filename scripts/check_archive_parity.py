@@ -4,12 +4,18 @@
 from __future__ import annotations
 
 import argparse
+import io
 import os
 import stat
 import sys
 import tarfile
 from pathlib import Path, PurePosixPath
 from typing import Iterable, Sequence
+
+try:
+    from scripts.archive_safety import preflight_tar_bytes
+except ModuleNotFoundError:  # direct execution: python scripts/check_archive_parity.py
+    from archive_safety import preflight_tar_bytes
 
 
 DEFAULT_MAX_ENTRIES = 100_000
@@ -51,13 +57,18 @@ def _bounded_names(names: Iterable[str], max_entries: int) -> frozenset[str]:
 
 
 def _archive_names(archive: Path, max_entries: int) -> frozenset[str]:
-    if archive.stat().st_size > MAX_ARCHIVE_BYTES:
+    with archive.open("rb") as source:
+        payload = source.read(MAX_ARCHIVE_BYTES + 1)
+    if len(payload) > MAX_ARCHIVE_BYTES:
         raise ValueError("archive byte bound exceeded")
-    with tarfile.open(archive, mode="r:*") as handle:
+    preflight_tar_bytes(payload, max_archive_bytes=MAX_ARCHIVE_BYTES)
+    with tarfile.open(fileobj=io.BytesIO(payload), mode="r:") as handle:
         def names() -> Iterable[str]:
             for member in handle:
                 if member.type not in (tarfile.DIRTYPE, tarfile.REGTYPE):
                     raise ValueError("special archive entries are not permitted")
+                if member.sparse is not None:
+                    raise ValueError("sparse archive entries are not permitted")
                 if member.size < 0 or member.size > MAX_MEMBER_BYTES:
                     raise ValueError("archive member byte bound exceeded")
                 yield _normalized_member_name(

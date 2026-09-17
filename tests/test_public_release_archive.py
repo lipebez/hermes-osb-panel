@@ -3,15 +3,20 @@ from __future__ import annotations
 import contextlib
 import io
 import subprocess
+import sys
 import tarfile
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from typing import Any, cast
+from unittest import mock
 
 from scripts.check_public_release import (
     ALLOWED_BINARY_ARCHIVE_PATHS,
     MAX_ARCHIVE_BYTES,
     MAX_MEMBER_BYTES,
+    _git_archive_head,
     format_findings,
     main,
     scan_archive_bytes,
@@ -26,6 +31,44 @@ def archive_bytes(entries: dict[str, bytes]) -> bytes:
             member.size = len(content)
             archive.addfile(member, io.BytesIO(content))
     return output.getvalue()
+
+
+def sparse_pax_fixture() -> bytes:
+    """Build the exact dangerous shape: per-file PAX sparse map then a file."""
+    def record(key: str, value: str) -> bytes:
+        body = f"{key}={value}\n".encode()
+        length = len(body) + 2
+        while True:
+            candidate = f"{length} ".encode() + body
+            if len(candidate) == length:
+                return candidate
+            length = len(candidate)
+
+    def header(name: str, size: int, typeflag: bytes) -> bytes:
+        block = bytearray(512)
+        block[:len(name)] = name.encode()
+        block[100:108] = b"0000644\0"
+        block[108:116] = b"0000000\0"
+        block[116:124] = b"0000000\0"
+        block[124:136] = f"{size:011o}\0".encode()
+        block[136:148] = b"00000000000\0"
+        block[148:156] = b"        "
+        block[156:157] = typeflag
+        block[257:263] = b"ustar\0"
+        block[263:265] = b"00"
+        block[148:156] = f"{sum(block):06o}\0 ".encode()
+        return bytes(block)
+
+    pax = record("GNU.sparse.map", "0,1") + record("GNU.sparse.size", "1")
+    padded_pax = pax + b"\0" * (-len(pax) % 512)
+    data = b"x" + b"\0" * 511
+    return (
+        header("PaxHeaders/sparse.bin", len(pax), b"x")
+        + padded_pax
+        + header("sparse.bin", 1, b"0")
+        + data
+        + b"\0" * 1024
+    )
 
 
 def candidate_tree_entries(repository_root: Path) -> dict[str, bytes]:
@@ -69,6 +112,27 @@ class PublicReleaseArchiveScannerTests(unittest.TestCase):
         entries = candidate_tree_entries(repository_root)
 
         self.assertEqual(scan_archive_bytes(archive_bytes(entries)), [])
+
+    def test_current_git_archive_with_global_comment_is_accepted(self):
+        repository_root = Path(__file__).resolve().parents[1]
+        payload = subprocess.run(
+            ["git", "archive", "--format=tar", "HEAD"],
+            cwd=repository_root,
+            check=True,
+            stdout=subprocess.PIPE,
+        ).stdout
+
+        self.assertEqual(scan_archive_bytes(payload), [])
+
+    def test_sparse_pax_is_rejected_before_tarfile_open(self):
+        payload = sparse_pax_fixture()
+        with mock.patch(
+            "scripts.check_public_release.tarfile.open",
+            side_effect=AssertionError("tarfile.open must not be reached"),
+        ) as opened:
+            with self.assertRaises(ValueError):
+                scan_archive_bytes(payload)
+        opened.assert_not_called()
 
     def test_candidate_tree_excludes_git_ignored_local_artifacts(self):
         repository_root = Path(__file__).resolve().parents[1]
@@ -224,6 +288,49 @@ class PublicReleaseArchiveScannerTests(unittest.TestCase):
                 handle.truncate(MAX_ARCHIVE_BYTES + 1)
             with contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(main(["--archive", str(archive)]), 2)
+
+
+class GitArchiveProcessTests(unittest.TestCase):
+    def _run_child(self, source: str, **kwargs: object) -> tuple[bytes | None, subprocess.Popen[bytes], float]:
+        real_popen = subprocess.Popen
+        children: list[subprocess.Popen[bytes]] = []
+
+        def replacement(_command: object, **options: Any) -> subprocess.Popen[bytes]:
+            child = cast(subprocess.Popen[bytes], real_popen([sys.executable, "-c", source], **options))
+            children.append(child)
+            return child
+
+        started = time.monotonic()
+        with mock.patch("scripts.check_public_release.subprocess.Popen", side_effect=replacement):
+            result = _git_archive_head(**kwargs)
+        return result, children[0], time.monotonic() - started
+
+    def test_short_process_returns_incrementally_read_payload(self):
+        result, child, elapsed = self._run_child("import os; os.write(1, b'archive')", timeout_seconds=1.0)
+        self.assertEqual(result, b"archive")
+        self.assertIsNotNone(child.poll())
+        self.assertLess(elapsed, 1.0)
+
+    def test_trapped_process_is_bounded_and_cleaned_up(self):
+        result, child, elapsed = self._run_child(
+            "import os,time; os.write(1, b'partial'); time.sleep(60)",
+            timeout_seconds=0.15,
+            cleanup_grace_seconds=0.1,
+        )
+        self.assertIsNone(result)
+        self.assertIsNotNone(child.poll())
+        self.assertLess(elapsed, 1.0)
+
+    def test_oversize_process_is_bounded_and_cleaned_up(self):
+        result, child, elapsed = self._run_child(
+            "import os,time; os.write(1, b'x' * 2048); time.sleep(60)",
+            timeout_seconds=1.0,
+            cleanup_grace_seconds=0.1,
+            max_archive_bytes=1024,
+        )
+        self.assertIsNone(result)
+        self.assertIsNotNone(child.poll())
+        self.assertLess(elapsed, 1.0)
 
 
 if __name__ == "__main__":

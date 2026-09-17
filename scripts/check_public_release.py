@@ -10,19 +10,30 @@ from __future__ import annotations
 
 import argparse
 import io
+import os
 import re
+import selectors
+import signal
 import subprocess
 import sys
 import tarfile
+import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Iterable
+
+try:
+    from scripts.archive_safety import preflight_tar_bytes
+except ModuleNotFoundError:  # direct execution: python scripts/check_public_release.py
+    from archive_safety import preflight_tar_bytes
 
 
 MAX_ARCHIVE_BYTES = 8 * 1024 * 1024
 MAX_MEMBER_BYTES = 4 * 1024 * 1024
 MAX_NAME_BYTES = 4096
 MAX_ENTRIES = 100_000
+GIT_ARCHIVE_TIMEOUT_SECONDS = 30.0
+PROCESS_CLEANUP_GRACE_SECONDS = 0.25
 ALLOWED_BINARY_ARCHIVE_PATHS = frozenset({"tests/fixtures/release_scanner_neutral.png"})
 BINARY_MEDIA_SUFFIXES = frozenset(
     {
@@ -133,6 +144,7 @@ def scan_archive_bytes(payload: bytes) -> list[Finding]:
     """Return filename/category findings from a Git archive tar payload only."""
     if len(payload) > MAX_ARCHIVE_BYTES:
         raise ValueError("archive byte bound exceeded")
+    preflight_tar_bytes(payload, max_archive_bytes=MAX_ARCHIVE_BYTES)
     findings: list[Finding] = []
     names: set[str] = set()
     count = 0
@@ -143,6 +155,8 @@ def scan_archive_bytes(payload: bytes) -> list[Finding]:
                 raise ValueError("entry bound exceeded")
             if member.type not in (tarfile.DIRTYPE, tarfile.REGTYPE):
                 raise ValueError("special archive entry")
+            if member.sparse is not None:
+                raise ValueError("sparse archive entry")
             if member.size < 0 or member.size > MAX_MEMBER_BYTES:
                 raise ValueError("archive member byte bound exceeded")
             filename = _safe_member_name(
@@ -181,19 +195,102 @@ def _head_exists() -> bool:
     ).returncode == 0
 
 
-def _git_archive_head() -> bytes | None:
+def _bounded_wait(process: subprocess.Popen[bytes], timeout: float) -> int | None:
+    try:
+        return process.wait(timeout=max(timeout, 0.001))
+    except subprocess.TimeoutExpired:
+        return None
+
+
+def _signal_process_group(process: subprocess.Popen[bytes], signum: int) -> None:
+    if process.poll() is None:
+        try:
+            os.killpg(process.pid, signum)
+        except ProcessLookupError:
+            pass
+
+
+def _git_archive_head(
+    *,
+    timeout_seconds: float = GIT_ARCHIVE_TIMEOUT_SECONDS,
+    cleanup_grace_seconds: float = PROCESS_CLEANUP_GRACE_SECONDS,
+    max_archive_bytes: int = MAX_ARCHIVE_BYTES,
+) -> bytes | None:
+    """Read git archive incrementally with a hard deadline and bounded cleanup."""
     process = subprocess.Popen(
         ["git", "archive", "--format=tar", "HEAD"],
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
+        start_new_session=True,
     )
     assert process.stdout is not None
-    payload = process.stdout.read(MAX_ARCHIVE_BYTES + 1)
-    if len(payload) > MAX_ARCHIVE_BYTES:
-        process.kill()
-        process.wait()
-        return None
-    return payload if process.wait() == 0 else None
+    stdout = process.stdout
+    selector = selectors.DefaultSelector()
+    failure: BaseException | None = None
+    failure_traceback = None
+    result: bytes | None = None
+    try:
+        deadline = time.monotonic() + timeout_seconds
+        descriptor = stdout.fileno()
+        os.set_blocking(descriptor, False)
+        selector.register(descriptor, selectors.EVENT_READ)
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if not selector.select(min(remaining, 0.1)):
+                continue
+            chunk = os.read(descriptor, min(65_536, max_archive_bytes + 1 - total))
+            if not chunk:
+                returncode = _bounded_wait(process, max(0.0, deadline - time.monotonic()))
+                if returncode == 0:
+                    result = b"".join(chunks)
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > max_archive_bytes:
+                break
+    except BaseException as error:
+        failure = error
+        failure_traceback = error.__traceback__
+    finally:
+        try:
+            selector.close()
+        except BaseException as error:
+            if failure is None:
+                failure, failure_traceback = error, error.__traceback__
+        try:
+            stdout.close()
+        except BaseException as error:
+            if failure is None:
+                failure, failure_traceback = error, error.__traceback__
+        try:
+            _signal_process_group(process, signal.SIGTERM)
+        except BaseException as error:
+            if failure is None:
+                failure, failure_traceback = error, error.__traceback__
+        try:
+            stopped = _bounded_wait(process, cleanup_grace_seconds)
+        except BaseException as error:
+            stopped = None
+            if failure is None:
+                failure, failure_traceback = error, error.__traceback__
+        if stopped is None:
+            try:
+                _signal_process_group(process, signal.SIGKILL)
+            except BaseException as error:
+                if failure is None:
+                    failure, failure_traceback = error, error.__traceback__
+            try:
+                _bounded_wait(process, cleanup_grace_seconds)
+            except BaseException as error:
+                if failure is None:
+                    failure, failure_traceback = error, error.__traceback__
+    if failure is not None:
+        raise failure.with_traceback(failure_traceback)
+    return result
 
 
 def _read_archive(path: Path) -> bytes:
