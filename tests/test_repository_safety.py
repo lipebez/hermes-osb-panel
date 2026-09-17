@@ -254,22 +254,50 @@ class RepositorySafetyTests(unittest.TestCase):
                 positions = [text.index(command, start) for command in expected]
                 self.assertEqual(positions, sorted(positions))
 
-    def test_release_qa_is_fail_fast_and_uses_one_exact_archive(self):
+    def test_release_qa_is_fail_fast_and_binds_checkout_and_one_exact_archive(self):
         qa = (ROOT / "docs" / "qa.md").read_text(encoding="utf-8")
 
         self.assertIn("set -euo pipefail", qa)
-        clean = qa.index('git status --porcelain')
+        clean = qa.index("git status --porcelain=v1 --untracked-files=normal")
         candidate = qa.index('CANDIDATE_SHA="$(git rev-parse HEAD)"')
-        archive = qa.index('git archive --format=tar "$CANDIDATE_SHA"')
-        archive_root = qa.index('cd "$ARCHIVE_ROOT"')
-        suite = qa.index("unittest discover", archive_root)
-        scanner = qa.index("check_public_release.py --archive", suite)
+        initial_head = qa.index('test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"', candidate)
+        initial_diff = qa.index('git diff --quiet "$CANDIDATE_SHA" --', initial_head)
+        initial_cached = qa.index("git diff --cached --quiet", initial_diff)
+        archive = qa.index('git archive --format=tar "$CANDIDATE_SHA"', initial_cached)
+        node = qa.index('cd "$REPO_ROOT" && node --check dashboard/dist/index.js', archive)
+        tracked_python = qa.index("git ls-files -z -- '*.py'", node)
+        ast_gate = qa.index('python3 -B - "$REPO_ROOT" "${TRACKED_PYTHON[@]}"', tracked_python)
+        suite = qa.index("unittest discover", ast_gate)
+        scanner = qa.index('check_public_release.py" --archive "$CANDIDATE_ARCHIVE"', suite)
         doctor = qa.index('plugins doctor "$ARCHIVE_ROOT" --ci', scanner)
         evidence = qa.index("build_release_evidence.py", doctor)
-        self.assertEqual(
-            [clean, candidate, archive, archive_root, suite, scanner, doctor, evidence],
-            sorted([clean, candidate, archive, archive_root, suite, scanner, doctor, evidence]),
-        )
+        final_head = qa.index('git -C "$REPO_ROOT" rev-parse HEAD', evidence)
+        final_status = qa.index("git -C \"$REPO_ROOT\" status --porcelain=v1 --untracked-files=normal", final_head)
+        final_diff = qa.index('git -C "$REPO_ROOT" diff --quiet "$CANDIDATE_SHA" --', final_status)
+        final_cached = qa.index('git -C "$REPO_ROOT" diff --cached --quiet', final_diff)
+        ordered = [
+            clean,
+            candidate,
+            initial_head,
+            initial_diff,
+            initial_cached,
+            archive,
+            node,
+            tracked_python,
+            ast_gate,
+            suite,
+            scanner,
+            doctor,
+            evidence,
+            final_head,
+            final_status,
+            final_diff,
+            final_cached,
+        ]
+        self.assertEqual(ordered, sorted(ordered))
+        self.assertEqual(qa.count('git archive --format=tar "$CANDIDATE_SHA"'), 1)
+        self.assertNotIn('cd "$ARCHIVE_ROOT"', qa)
+        self.assertNotIn("rglob", qa)
         self.assertIn("trap 'rm -rf \"$QA_ROOT\"' EXIT", qa)
         self.assertIn('TESTS_FAILED=0  # reached only after the suite pipeline succeeded', qa)
         self.assertIn('--tests-failed "$TESTS_FAILED"', qa)

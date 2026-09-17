@@ -10,7 +10,7 @@ The shareable data source is only `tests/fixtures/demo_snapshot_v1.json` through
 
 ## Required exact-candidate gates
 
-Commit the intended candidate, then run this single Bash block from its clean repository root. Set `HERMES_AGENT_ROOT` to a clean Hermes Agent checkout at the validated commit whose own venv contains the `hermes` executable. The block aborts on every failed command or failed pipeline, creates one exact archive before changing directory, and runs every candidate gate from the extracted archive or its original tar bytes:
+Commit the intended candidate, then run this single Bash block from its clean repository root. Set `HERMES_AGENT_ROOT` to a clean Hermes Agent checkout at the validated commit whose own venv contains the `hermes` executable. The block aborts on every failed command or failed pipeline. It binds the clean canonical checkout to one exact candidate SHA, creates exactly one archive from that SHA, runs path-sensitive source gates in the checkout, and runs archive-facing gates against that archive or its extracted bytes:
 
 ```bash
 HERMES_AGENT_ROOT=/path/to/hermes-agent-v0.21.3
@@ -18,47 +18,64 @@ set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
-test -z "$(git status --porcelain --untracked-files=normal)"
+test -z "$(git status --porcelain=v1 --untracked-files=normal)"
 CANDIDATE_SHA="$(git rev-parse HEAD)"
 [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+git diff --quiet "$CANDIDATE_SHA" --
+git diff --cached --quiet
 
 QA_ROOT="$(mktemp -d /tmp/hermes-osb-panel-release.XXXXXX)"
 trap 'rm -rf "$QA_ROOT"' EXIT
 ARCHIVE_ROOT="$QA_ROOT/source"
 CANDIDATE_ARCHIVE="$QA_ROOT/candidate.tar"
 TEST_LOG="$QA_ROOT/tests.log"
+EVIDENCE_OUTPUT="$QA_ROOT/release-evidence.json"
+TRACKED_PYTHON_LIST="$QA_ROOT/tracked-python.zlist"
 mkdir -p "$ARCHIVE_ROOT"
 git archive --format=tar "$CANDIDATE_SHA" > "$CANDIDATE_ARCHIVE"
 tar -xf "$CANDIDATE_ARCHIVE" -C "$ARCHIVE_ROOT"
-cd "$ARCHIVE_ROOT"
 
 STATIC_GATE_PASSED=false
 UNIT_GATE_PASSED=false
 ARCHIVE_GATE_PASSED=false
-node --check dashboard/dist/index.js
-PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'import ast, pathlib; [ast.parse(path.read_text(encoding="utf-8"), filename=str(path)) for path in sorted(pathlib.Path(".").rglob("*.py"))]'
+(cd "$REPO_ROOT" && node --check dashboard/dist/index.js)
+git ls-files -z -- '*.py' > "$TRACKED_PYTHON_LIST"
+mapfile -d '' TRACKED_PYTHON < "$TRACKED_PYTHON_LIST"
+((${#TRACKED_PYTHON[@]} > 0))
+PYTHONDONTWRITEBYTECODE=1 python3 -B - "$REPO_ROOT" "${TRACKED_PYTHON[@]}" <<'PY'
+import ast
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+for relative in sys.argv[2:]:
+    path = root / relative
+    ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+PY
 STATIC_GATE_PASSED=true
 
-PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests -v 2>&1 | tee "$TEST_LOG"
+(cd "$REPO_ROOT" && PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests -v) \
+  2>&1 | tee "$TEST_LOG"
 TESTS_RUN="$(python3 -c 'import pathlib, re, sys; matches=re.findall(r"Ran (\d+) tests?", pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")); print(matches[-1] if matches else "")' "$TEST_LOG")"
 test -n "$TESTS_RUN"
 TESTS_PASSED="$TESTS_RUN"
 TESTS_FAILED=0  # reached only after the suite pipeline succeeded
 UNIT_GATE_PASSED=true
 
-PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/check_public_release.py --archive "$CANDIDATE_ARCHIVE"
+PYTHONDONTWRITEBYTECODE=1 python3 -B "$REPO_ROOT/scripts/check_public_release.py" --archive "$CANDIDATE_ARCHIVE"
 ARCHIVE_GATE_PASSED=true
 
 HERMES_REF=dfc28b61a0cfed58bcc200038c6bfec6f31adcd2
 test "$(git -C "$HERMES_AGENT_ROOT" rev-parse HEAD)" = "$HERMES_REF"
-test -z "$(git -C "$HERMES_AGENT_ROOT" status --porcelain --untracked-files=normal)"
+test -z "$(git -C "$HERMES_AGENT_ROOT" status --porcelain=v1 --untracked-files=normal)"
 HERMES_CLI="$HERMES_AGENT_ROOT/venv/bin/hermes"
 test -x "$HERMES_CLI"
 QA_HOME="$QA_ROOT/hermes-home"
 HOME="$QA_HOME" HERMES_HOME="$QA_HOME/hermes" \
   "$HERMES_CLI" plugins doctor "$ARCHIVE_ROOT" --ci
 
-PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/build_release_evidence.py \
+PYTHONDONTWRITEBYTECODE=1 python3 -B "$REPO_ROOT/scripts/build_release_evidence.py" \
   --project-version 3.1.0 \
   --candidate-sha "$CANDIDATE_SHA" \
   --tested-hermes-version 0.21.3 \
@@ -71,10 +88,21 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/build_release_evidence.py \
   --tests-run "$TESTS_RUN" \
   --tests-passed "$TESTS_PASSED" \
   --tests-failed "$TESTS_FAILED" \
-  --output /tmp/hermes-osb-panel-release-evidence.json
+  --output "$EVIDENCE_OUTPUT"
+
+# Detect concurrent checkout drift after every gate and evidence generation.
+test "$(git -C "$REPO_ROOT" rev-parse HEAD)" = "$CANDIDATE_SHA"
+test -z "$(git -C "$REPO_ROOT" status --porcelain=v1 --untracked-files=normal)"
+git -C "$REPO_ROOT" diff --quiet "$CANDIDATE_SHA" --
+git -C "$REPO_ROOT" diff --cached --quiet
+
+# Review the safe aggregate now; the EXIT trap removes its unique QA_ROOT path.
+python3 -B -m json.tool "$EVIDENCE_OUTPUT"
 ```
 
-The discovery command runs the complete current suite without baking a test count into the documentation. `set -euo pipefail` makes a unittest failure propagate through `tee`; test totals and true gate values are assigned only after their commands have exited successfully. The executable must come from the exact clean Hermes checkout, not merely report a matching version. Temporary source, log, and isolated Hermes home are removed by the trap on success or failure. Review and then delete `/tmp/hermes-osb-panel-release-evidence.json`; never commit it by default.
+Node syntax, tracked-file AST parsing, and the complete current suite run in the clean canonical checkout. This is intentional: three path-sensitive tests depend respectively on the candidate Git object database and `HEAD`, repository `.gitignore` semantics, and the repository root being outside `/tmp`. Running those tests from an extracted `/tmp` archive would change their required environment and produce two failures plus one error rather than valid release evidence. The initial and final clean-status, exact-`HEAD`, unstaged-diff, and staged-diff checks bind every checkout path used by those gates to the same `CANDIDATE_SHA` and detect concurrent drift.
+
+The public-release scanner consumes the one exact tar directly, and Hermes doctor consumes only its extracted tree. The discovery command does not bake a test count into the documentation. `set -euo pipefail` makes a unittest failure propagate through `tee`; test totals and true gate values are assigned only after their commands have exited successfully. The executable must come from the exact clean Hermes checkout, not merely report a matching version. The evidence builder receives the same candidate SHA and only successful gate results. Its safe aggregate is printed for review before the shell exits; the unique temporary source, archive, logs, evidence, and isolated Hermes home are then removed by the trap, leaving no fixed residual file.
 
 ## Isolated clean-install harness
 
