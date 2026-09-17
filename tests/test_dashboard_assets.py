@@ -623,7 +623,7 @@ self.addEventListener('activate', event => event.waitUntil((async () => {{
         self.assertEqual(manifest["version"], version)
         self.assertEqual(project["version"], version)
         self.assertEqual(manifest["css"], f"dist/style.css?v={version}")
-        self.assertIn(f"Current release: `{version}`", readme)
+        self.assertIn(f"Source version: `{version}`", readme)
 
     def test_behavioral_cdp_harness_covers_product_invariants(self):
         qa = (ROOT / "scripts" / "qa_dashboard_cdp.py").read_text(encoding="utf-8")

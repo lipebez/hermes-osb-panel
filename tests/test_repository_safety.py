@@ -254,6 +254,64 @@ class RepositorySafetyTests(unittest.TestCase):
                 positions = [text.index(command, start) for command in expected]
                 self.assertEqual(positions, sorted(positions))
 
+    def test_release_qa_is_fail_fast_and_uses_one_exact_archive(self):
+        qa = (ROOT / "docs" / "qa.md").read_text(encoding="utf-8")
+
+        self.assertIn("set -euo pipefail", qa)
+        clean = qa.index('git status --porcelain')
+        candidate = qa.index('CANDIDATE_SHA="$(git rev-parse HEAD)"')
+        archive = qa.index('git archive --format=tar "$CANDIDATE_SHA"')
+        archive_root = qa.index('cd "$ARCHIVE_ROOT"')
+        suite = qa.index("unittest discover", archive_root)
+        scanner = qa.index("check_public_release.py --archive", suite)
+        doctor = qa.index('plugins doctor "$ARCHIVE_ROOT" --ci', scanner)
+        evidence = qa.index("build_release_evidence.py", doctor)
+        self.assertEqual(
+            [clean, candidate, archive, archive_root, suite, scanner, doctor, evidence],
+            sorted([clean, candidate, archive, archive_root, suite, scanner, doctor, evidence]),
+        )
+        self.assertIn("trap 'rm -rf \"$QA_ROOT\"' EXIT", qa)
+        self.assertIn('TESTS_FAILED=0  # reached only after the suite pipeline succeeded', qa)
+        self.assertIn('--tests-failed "$TESTS_FAILED"', qa)
+        self.assertNotIn("--tests-failed 0", qa)
+
+    def test_readme_uses_opt_in_install_doctor_enable_sequence(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        commands = (
+            "plugins install lipebez/hermes-osb-panel",
+            "--no-enable",
+            "plugins list --user --json",
+            "plugins doctor hermes-osb-panel --ci",
+            "plugins enable hermes-osb-panel --no-allow-tool-override",
+            "dashboard --no-open",
+        )
+        positions = [readme.index(command) for command in commands]
+        self.assertEqual(positions, sorted(positions))
+        self.assertNotIn("Current release", readme)
+
+    def test_ci_actions_are_pinned_to_full_commit_shas(self):
+        ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        uses = re.findall(r"(?m)^\s*uses:\s*(actions/(?:checkout|setup-python))@([^\s#]+)", ci)
+
+        self.assertEqual(len(uses), 3)
+        for action, revision in uses:
+            with self.subTest(action=action):
+                self.assertRegex(revision, r"^[0-9a-f]{40}$")
+
+    def test_docs_describe_redirect_and_release_state_without_stale_claims(self):
+        qa = (ROOT / "docs" / "qa.md").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
+        changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+
+        self.assertIn("forwards same-origin 3xx responses", qa)
+        self.assertIn("subsequent destination", qa)
+        self.assertNotIn("The proxy rejects CONNECT, non-exact origins, redirects", qa)
+        for text in (qa, readme, security, changelog):
+            self.assertNotIn("documentation freeze", text)
+            self.assertNotIn("no `v3.1.0` tag", text)
+        self.assertNotIn("Current release", readme)
+
 
 if __name__ == "__main__":
     unittest.main()

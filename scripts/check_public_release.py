@@ -8,13 +8,14 @@ will not inspect an uncommitted working tree as a substitute for a release.
 
 from __future__ import annotations
 
+import argparse
 import io
 import re
 import subprocess
 import sys
 import tarfile
 from dataclasses import dataclass
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Iterable
 
 
@@ -150,7 +151,31 @@ def _git_archive_head() -> bytes | None:
     return result.stdout if result.returncode == 0 else None
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Scan a committed public-release archive")
+    parser.add_argument(
+        "--archive",
+        type=Path,
+        help="scan this prebuilt git-archive tar instead of creating git archive HEAD",
+    )
+    args = parser.parse_args(argv)
+
+    if args.archive is not None:
+        try:
+            payload = args.archive.read_bytes()
+        except OSError:
+            print("public release scanner: could not read supplied archive.", file=sys.stderr)
+            return 2
+        try:
+            rendered = format_findings(scan_archive_bytes(payload))
+        except (OSError, tarfile.TarError):
+            print("public release scanner: supplied archive is not a readable tar.", file=sys.stderr)
+            return 2
+        if rendered:
+            print(rendered)
+            return 1
+        return 0
+
     if not _head_exists():
         print(
             "public release scanner: no HEAD commit; git archive HEAD requires a committed release candidate.",

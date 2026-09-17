@@ -30,4 +30,4 @@ All notable changes to Hermes OSB Panel will be documented in this file.
 - Validated the plugin admission/runtime contracts and local fixture behavior against Hermes Agent v0.21.3 at exact upstream commit `dfc28b61a0cfed58bcc200038c6bfec6f31adcd2`.
 - Inspected the documented OSB public-data boundary against Open Second Brain v1.56.0 at observed commit `54bb28d9b760758446e494e3c6473f6534dfbdee`. This does not claim a production adapter or compatibility with other OSB versions.
 - Retained the separate Windows PowerShell staging result for discovery and disable/removal recovery without treating it as a broad compatibility claim or as execution of the Linux-only clean-install harness.
-- At the documentation freeze before release merge, no `v3.1.0` tag, package artifact, or GitHub Release existed; no nonexistent release URL is recorded here.
+- Source metadata identifies version 3.1.0. Public tags and GitHub Releases, when available, are the authority for published artifacts; this changelog does not imply that one exists.

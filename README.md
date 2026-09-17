@@ -2,7 +2,7 @@
 
 Hermes OSB Panel is a privacy-first, read-only dashboard companion for normalized Open Second Brain (OSB) snapshots in Hermes Agent. It is an independent community project by Filipe Bezerra (`@lipebez`): it is not an official Hermes Agent or Open Second Brain module and is not affiliated with, endorsed by, or maintained by either project.
 
-> **Source and package status.** Current release: `3.1.0` is the version declared in source metadata, not a claim that a public artifact has already been published. At this documentation freeze, before the release merge, no `v3.1.0` tag, package artifact, or GitHub Release exists; this document therefore does not link to one. The public source repository is https://github.com/lipebez/hermes-osb-panel. Install only an immutable commit you have verified, or resolve and verify the tag after it is actually published.
+> **Source and package status.** Source version: `3.1.0`. Public tags and GitHub Releases, when available, are the authority for published artifacts. The public source repository is https://github.com/lipebez/hermes-osb-panel. Install only a full immutable commit SHA you have verified.
 
 ## What it does
 
@@ -31,16 +31,20 @@ The panel does not add its own authentication layer and must not be exposed as a
 
 ## GitHub installation
 
-Hermes Agent v0.21.3 accepts a full 40-character commit SHA for `--ref`. After the intended commit is present in the public repository, install that exact revision:
+Hermes Agent v0.21.3 accepts a full 40-character commit SHA for `--ref`. Its parser and help at upstream commit `dfc28b61a0cfed58bcc200038c6bfec6f31adcd2` support the commands and flags below. Installing a custom source is opt-in: install it disabled, inspect the installed entry, run the runtime doctor against that installed plugin, and only then enable it:
 
 ```bash
+PLUGIN_SHA=<40-character-lowercase-commit-sha>
 hermes plugins install lipebez/hermes-osb-panel \
-  --ref <40-character-lowercase-commit-sha> \
-  --enable
+  --ref "$PLUGIN_SHA" \
+  --no-enable
+hermes plugins list --user --json
+hermes plugins doctor hermes-osb-panel --ci
+hermes plugins enable hermes-osb-panel --no-allow-tool-override
 hermes dashboard --no-open
 ```
 
-Do not substitute a branch name for the SHA. Once `v3.1.0` actually exists, verify the tag in a trusted checkout, resolve it to its commit with `git rev-parse 'v3.1.0^{commit}'`, compare the resulting full SHA with the release evidence, and pass that SHA to `--ref`; Hermes v0.21.3 does not accept a tag name in `--ref`. At this documentation freeze the tag does not exist, so there is no tag-based install target to publish yet.
+Confirm that `plugins list --user --json` identifies `hermes-osb-panel` and that doctor exits successfully before enabling it. Do not substitute a branch or tag name for the SHA. If a public version tag is available, verify it in a trusted checkout, resolve it with `git rev-parse '<tag>^{commit}'`, compare the full result with the release evidence, and pass that SHA to `--ref`; Hermes v0.21.3 accepts only a full commit SHA there.
 
 To turn the plugin off later:
 
@@ -126,21 +130,7 @@ See [`docs/architecture.md`](docs/architecture.md) for the contract and threat b
 
 ## Local verification
 
-Run from the repository root:
-
-```bash
-node --check dashboard/dist/index.js
-PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests -v
-PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'import ast, pathlib, subprocess; [ast.parse(pathlib.Path(path).read_text(encoding="utf-8"), filename=path) for path in subprocess.check_output(["git", "ls-files", "*.py"], text=True).splitlines()]'
-HERMES_CLI=/path/to/hermes-agent-v0.21.3/venv/bin/hermes
-(
-  QA_HOME="$(mktemp -d)"
-  trap 'rm -rf "$QA_HOME"' EXIT
-  HOME="$QA_HOME" HERMES_HOME="$QA_HOME/hermes" "$HERMES_CLI" plugins doctor . --ci
-)
-```
-
-Use a Hermes executable built from the exact validated upstream commit above; the temporary `HOME`/`HERMES_HOME` keeps the doctor check away from active profiles and is removed even if the check fails. After committing the release documentation locally, run `PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/check_public_release.py`. It scans exactly `git archive HEAD`, not the working tree. A pass validates that committed archive only; it does not create a tag or GitHub Release.
+Use the single fail-fast exact-archive procedure in [`docs/qa.md`](docs/qa.md). It verifies a clean candidate, creates one `git archive` for its full SHA, and runs Node syntax, Python AST, the complete suite, public-release scanning, the exact Hermes doctor, and evidence generation against those same candidate bytes. Its temporary `HOME`/`HERMES_HOME` keeps doctor away from active profiles. A pass validates that commit only; it does not create or imply a tag or GitHub Release.
 
 ## Contributing and license
 

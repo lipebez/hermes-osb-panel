@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import contextlib
 import io
 import subprocess
 import tarfile
+import tempfile
 import unittest
 from pathlib import Path
 
 from scripts.check_public_release import (
     ALLOWED_BINARY_ARCHIVE_PATHS,
     format_findings,
+    main,
     scan_archive_bytes,
 )
 
@@ -165,6 +168,18 @@ class PublicReleaseArchiveScannerTests(unittest.TestCase):
         )
 
         self.assertEqual(findings, [])
+
+    def test_cli_can_scan_an_existing_exact_archive(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            archive = Path(temporary) / "candidate.tar"
+            archive.write_bytes(archive_bytes({"README.md": b"safe release bytes\n"}))
+            stderr = io.StringIO()
+
+            with contextlib.redirect_stderr(stderr):
+                result = main(["--archive", str(archive)])
+
+            self.assertEqual(result, 0)
+            self.assertEqual(stderr.getvalue(), "")
 
 
 if __name__ == "__main__":

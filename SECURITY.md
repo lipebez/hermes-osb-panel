@@ -19,7 +19,7 @@ Please do not disclose a vulnerability publicly before a coordinated fix or the 
 
 ## Supported versions
 
-The supported release line is **3.1.x**. At this documentation freeze, before the release merge, no `v3.1.0` tag or GitHub Release existed; reports against the exact 3.1.x source commit are still accepted privately. Versions before 3.1 are unsupported. Support for a later minor line must be stated here rather than inferred.
+The supported source line is **3.1.x**, including its commits before or without a packaged release. Public tags and GitHub Releases, when available, are the authority for published artifacts in that line. Versions before 3.1 are unsupported. Support for a later minor line must be stated here rather than inferred.
 
 ## Security boundary and non-goals
 
