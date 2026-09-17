@@ -15,6 +15,22 @@ SHA = "a" * 40
 PLUGIN = "hermes-osb-panel"
 
 
+def uses_dashboard_stop(command):
+    argv = tuple(command)
+    return any(argv[index : index + 2] == ("dashboard", "--stop") for index in range(len(argv) - 1))
+
+
+class Clock:
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
 class Process:
     def __init__(self):
         self.terminated = False
@@ -43,6 +59,7 @@ class Harness:
         self.mutate = mutate or {}
         self.fail_command = fail_command
         self.popen_env = None
+        self.clock = Clock()
 
     def run(self, command, **kwargs):
         self.calls.append(tuple(command))
@@ -91,11 +108,12 @@ class Harness:
             "HERMES_WEBUI_PASSWORD": "secret",
             "SOME_AUTH_TOKEN": "secret",
         })
-        return qa.run_clean_install(
-            "owner/repo", SHA, hermes="hermes", environ=env,
-            runner=self.run, popen=self.popen, fetch_json=self.fetch,
-            sleep=lambda _seconds: None, port_picker=lambda: 43123,
-        )
+        with mock.patch.object(qa.time, "monotonic", side_effect=self.clock.monotonic):
+            return qa.run_clean_install(
+                "owner/repo", SHA, hermes="hermes", environ=env,
+                runner=self.run, popen=self.popen, fetch_json=self.fetch,
+                sleep=self.clock.sleep, port_picker=lambda: 43123,
+            )
 
 
 class ValidationTests(unittest.TestCase):
@@ -109,13 +127,68 @@ class ValidationTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(Exception):
                 qa.commit_sha(value)
 
-    def test_source_never_contains_dashboard_stop(self):
-        source = Path(qa.__file__).read_text(encoding="utf-8")
-        forbidden = "dashboard" + " --" + "stop"
-        self.assertNotIn(forbidden, source)
+    def test_recorded_subprocess_argv_never_stops_a_shared_dashboard(self):
+        harness = Harness()
+        harness.execute()
+        commands = [call for call in harness.calls if call[:1] != ("GET",)]
+        self.assertFalse(any(uses_dashboard_stop(command) for command in commands))
+        self.assertTrue(uses_dashboard_stop(("hermes", "dashboard", "--stop")))
 
 
 class CleanInstallTests(unittest.TestCase):
+    def test_wait_json_polls_until_plugin_is_active(self):
+        clock = Clock()
+        responses = iter(
+            [
+                {"plugins": []},
+                {"plugins": [{"id": PLUGIN, "enabled": False, "status": "inactive"}]},
+                {"plugins": [{"id": PLUGIN, "enabled": True, "status": "active"}]},
+            ]
+        )
+        calls = []
+
+        def fetch(url, timeout):
+            calls.append((url, timeout))
+            return next(responses)
+
+        result = qa._wait_json(
+            fetch, "http:" + "//" + "127.0.0.1:43123/plugins", Process(), clock.sleep, qa._active,
+            timeout=1.0, monotonic=clock.monotonic,
+        )
+
+        self.assertTrue(qa._active(result))
+        self.assertEqual(len(calls), 3)
+
+    def test_wait_json_times_out_when_plugin_never_becomes_active(self):
+        clock = Clock()
+        calls = []
+
+        def fetch(url, timeout):
+            calls.append((url, timeout))
+            return {"plugins": [{"id": PLUGIN, "enabled": False}]}
+
+        with self.assertRaisesRegex(qa.QAFailure, "did not become ready"):
+            qa._wait_json(
+                fetch, "http:" + "//" + "127.0.0.1:43123/plugins", Process(), clock.sleep, qa._active,
+                timeout=0.25, monotonic=clock.monotonic,
+            )
+        self.assertEqual(len(calls), 3)
+
+    def test_wait_json_limits_transient_fetch_failures(self):
+        clock = Clock()
+        calls = []
+
+        def fetch(url, timeout):
+            calls.append((url, timeout))
+            raise OSError("not ready")
+
+        with self.assertRaisesRegex(qa.QAFailure, "repeatedly unavailable"):
+            qa._wait_json(
+                fetch, "http:" + "//" + "127.0.0.1:43123/plugins", Process(), clock.sleep, qa._active,
+                timeout=10.0, max_failures=3, monotonic=clock.monotonic,
+            )
+        self.assertEqual(len(calls), 3)
+
     def test_order_is_deterministic_and_environment_is_sanitized(self):
         harness = Harness()
         result = harness.execute()

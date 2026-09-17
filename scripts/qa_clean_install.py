@@ -23,6 +23,9 @@ PLUGIN_ID = "hermes-osb-panel"
 ROOT = Path(__file__).resolve().parents[1]
 MAX_RESPONSE_BYTES = 1_000_000
 COMMAND_TIMEOUT = 120
+DASHBOARD_READY_TIMEOUT = 15.0
+DASHBOARD_POLL_INTERVAL = 0.1
+MAX_TRANSIENT_FETCH_FAILURES = 50
 SENSITIVE_ENV_KEYS = frozenset(
     {
         "HERMES_OSB_PANEL_ENABLE_DIRECT_MARKDOWN",
@@ -156,18 +159,37 @@ def _list_plugins(
 
 
 def _wait_json(
-    fetch_json: Callable[[str, float], Any], url: str, process: Any, sleep: Callable[[float], None]
+    fetch_json: Callable[[str, float], Any],
+    url: str,
+    process: Any,
+    sleep: Callable[[float], None],
+    condition: Callable[[Any], bool],
+    *,
+    timeout: float = DASHBOARD_READY_TIMEOUT,
+    max_failures: int = MAX_TRANSIENT_FETCH_FAILURES,
+    monotonic: Callable[[], float] | None = None,
 ) -> Any:
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
+    clock = time.monotonic if monotonic is None else monotonic
+    deadline = clock() + timeout
+    failures = 0
+    while clock() < deadline:
         if process.poll() is not None:
             raise QAFailure("dashboard exited before becoming ready")
+        remaining = deadline - clock()
         try:
-            return fetch_json(url, 2.0)
+            payload = fetch_json(url, min(2.0, remaining))
         except QAFailure:
             raise
         except Exception:
-            sleep(0.1)
+            failures += 1
+            if failures >= max_failures:
+                raise QAFailure("dashboard endpoint was repeatedly unavailable")
+        else:
+            if condition(payload):
+                return payload
+        remaining = deadline - clock()
+        if remaining > 0:
+            sleep(min(DASHBOARD_POLL_INTERVAL, remaining))
     raise QAFailure("dashboard did not become ready")
 
 
@@ -261,9 +283,7 @@ def run_clean_install(
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
             )
-            plugins = _wait_json(fetch_json, base_url + "/api/dashboard/plugins", dashboard, sleep)
-            if not _active(plugins):
-                raise QAFailure("dashboard did not load the plugin as active")
+            _wait_json(fetch_json, base_url + "/api/dashboard/plugins", dashboard, sleep, _active)
             health = fetch_json(base_url + f"/api/plugins/{PLUGIN_ID}/health", 5.0)
             _assert_health(health)
             snapshot = fetch_json(base_url + f"/api/plugins/{PLUGIN_ID}/snapshot", 5.0)
