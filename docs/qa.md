@@ -22,6 +22,8 @@ The suite covers normalization, fail-closed reader selection, redaction, fixture
 
 ## Isolated clean-install harness
 
+This real clean-install harness is **Linux-only**. Its ownership proof depends on Linux `/proc` process, session, socket-inode, and listener data; it must fail closed rather than be treated as a Windows or macOS clean-install procedure. The Windows staging result and recovery notes below are separate manual staging evidence, not execution of this harness.
+
 After the candidate commit is available from GitHub at an immutable lowercase SHA, run from a checkout that has a compatible `hermes` executable on `PATH`:
 
 ```bash

@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import argparse
-import http.client
 import json
 import os
 import re
 import secrets
+import selectors
 import shutil
 import signal
 import socket
@@ -25,6 +25,8 @@ PLUGIN_ID = "hermes-osb-panel"
 ROOT = Path(__file__).resolve().parents[1]
 MAX_RESPONSE_BYTES = 1_000_000
 MAX_STATUS_RESPONSE_BYTES = 64_000
+MAX_HEADER_BYTES = 64_000
+MAX_STATUS_LINE_BYTES = 8_192
 COMMAND_TIMEOUT = 120.0
 TOTAL_TIMEOUT = 180.0
 CLEANUP_TIMEOUT = 10.0
@@ -52,16 +54,7 @@ class OwnedProcess:
 
     process: Any
     pgid: int
-
-
-class _PinnedHTTPConnection(http.client.HTTPConnection):
-    """A direct HTTP/1.1 connection which can never reconnect itself."""
-
-    def connect(self) -> None:
-        if getattr(self, "_pin_connect_attempted", False):
-            raise http.client.CannotSendRequest("reconnect refused")
-        self._pin_connect_attempted = True
-        super().connect()
+    harness_pgid: int | None = None
 
 
 def github_repo(value: str) -> str:
@@ -145,97 +138,138 @@ def _validate_loopback_url(url: str, expected_port: int) -> str:
     return path + (("?" + parsed.query) if parsed.query else "")
 
 
-def _http_stage_timeout(
-    connection: Any, socket_identity: Any, deadline: float, monotonic: Callable[[], float],
-) -> None:
-    remaining = deadline - monotonic()
-    if remaining <= 0:
-        raise QAFailure("clean-install QA deadline exceeded")
-    connection.timeout = remaining
-    if socket_identity is not None:
-        if connection.sock is not socket_identity:
-            raise _RetryableFetchFailure("dashboard connection identity changed")
-        socket_identity.settimeout(remaining)
+def _wait_socket(sock: Any, event: int, deadline: float, monotonic: Callable[[], float],
+                 selector_factory: Callable[[], Any]) -> None:
+    remaining = _remaining(deadline, monotonic)
+    with selector_factory() as selector:
+        selector.register(sock, event)
+        if not selector.select(remaining):
+            raise QAFailure("clean-install QA deadline exceeded")
+    _remaining(deadline, monotonic)
 
 
-def _http_stage_complete(deadline: float, monotonic: Callable[[], float]) -> None:
-    if monotonic() > deadline:
-        raise QAFailure("clean-install QA deadline exceeded")
+def _send_all(sock: Any, payload: bytes, deadline: float, monotonic: Callable[[], float],
+              selector_factory: Callable[[], Any]) -> None:
+    view = memoryview(payload)
+    while view:
+        _wait_socket(sock, selectors.EVENT_WRITE, deadline, monotonic, selector_factory)
+        try:
+            sent = sock.send(view)
+        except BlockingIOError:
+            continue
+        if sent <= 0:
+            raise _RetryableFetchFailure("dashboard connection failed")
+        view = view[sent:]
 
 
-def _read_pinned_json(
-    connection: Any, socket_identity: Any, path: str, limit: int,
-    deadline: float, monotonic: Callable[[], float],
-) -> Any:
-    if connection.sock is not socket_identity or socket_identity is None:
-        raise _RetryableFetchFailure("dashboard connection identity changed")
+def _recv_some(sock: Any, deadline: float, monotonic: Callable[[], float],
+               selector_factory: Callable[[], Any]) -> bytes:
+    while True:
+        _wait_socket(sock, selectors.EVENT_READ, deadline, monotonic, selector_factory)
+        try:
+            return sock.recv(65536)
+        except BlockingIOError:
+            continue
+
+
+def _read_pinned_json(sock: Any, path: str, limit: int, deadline: float,
+                      monotonic: Callable[[], float], selector_factory: Callable[[], Any]) -> Any:
+    request = (f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: application/json\r\n"
+               "Connection: keep-alive\r\n\r\n").encode("ascii")
+    _send_all(sock, request, deadline, monotonic, selector_factory)
+    received = bytearray()
+    marker = b"\r\n\r\n"
+    while marker not in received:
+        chunk = _recv_some(sock, deadline, monotonic, selector_factory)
+        if not chunk:
+            raise _RetryableFetchFailure("dashboard response ended before its headers")
+        received.extend(chunk)
+        if marker not in received and len(received) > MAX_HEADER_BYTES:
+            raise _RetryableFetchFailure("dashboard response headers exceeded the QA size limit")
+    raw_headers, body = bytes(received).split(marker, 1)
+    if len(raw_headers) + len(marker) > MAX_HEADER_BYTES:
+        raise _RetryableFetchFailure("dashboard response headers exceeded the QA size limit")
     try:
-        _http_stage_timeout(connection, socket_identity, deadline, monotonic)
-        connection.request("GET", path, headers={"Accept": "application/json", "Connection": "keep-alive"})
-        _http_stage_complete(deadline, monotonic)
-        if connection.sock is not socket_identity:
-            raise _RetryableFetchFailure("dashboard connection identity changed")
-        _http_stage_timeout(connection, socket_identity, deadline, monotonic)
-        response = connection.getresponse()
-        _http_stage_complete(deadline, monotonic)
-        if connection.sock is not socket_identity:
-            raise _RetryableFetchFailure("dashboard connection identity changed")
-        if response.version != 11:
-            raise _RetryableFetchFailure("dashboard did not preserve HTTP/1.1")
-        if response.status < 200 or response.status >= 300:
-            raise _RetryableFetchFailure("dashboard returned a non-success status")
-        content_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
-        if content_type != "application/json" and not content_type.endswith("+json"):
-            raise _RetryableFetchFailure("dashboard returned a non-JSON content type")
-        if response.will_close:
-            raise _RetryableFetchFailure("dashboard connection was not persistent")
-        _http_stage_timeout(connection, socket_identity, deadline, monotonic)
-        body = response.read(limit + 1)
-        _http_stage_complete(deadline, monotonic)
-    except _RetryableFetchFailure:
-        raise
-    except (OSError, http.client.HTTPException) as exc:
-        raise _RetryableFetchFailure("dashboard connection failed") from exc
-    if connection.sock is not socket_identity:
-        raise _RetryableFetchFailure("dashboard connection identity changed")
-    if len(body) > limit:
+        lines = raw_headers.decode("iso-8859-1").split("\r\n")
+        if len(lines[0].encode("iso-8859-1")) > MAX_STATUS_LINE_BYTES:
+            raise ValueError("status line too large")
+        version, status_text, _reason = lines[0].split(" ", 2)
+        if not re.fullmatch(r"[0-9]{3}", status_text):
+            raise ValueError("invalid status code")
+        status = int(status_text)
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise _RetryableFetchFailure("dashboard returned an invalid HTTP status") from exc
+    if version != "HTTP/1.1":
+        raise _RetryableFetchFailure("dashboard did not preserve HTTP/1.1")
+    if status < 200 or status >= 300:
+        raise _RetryableFetchFailure("dashboard returned a non-success status")
+    headers: dict[str, list[str]] = {}
+    for line in lines[1:]:
+        if not line or ":" not in line or line[0] in " \t":
+            raise _RetryableFetchFailure("dashboard returned invalid HTTP headers")
+        name, value = line.split(":", 1)
+        headers.setdefault(name.strip().lower(), []).append(value.strip())
+    if "transfer-encoding" in headers:
+        raise _RetryableFetchFailure("dashboard transfer encoding is not permitted")
+    lengths = headers.get("content-length", [])
+    if len(lengths) != 1 or re.fullmatch(r"[0-9]+", lengths[0]) is None:
+        raise _RetryableFetchFailure("dashboard response requires Content-Length")
+    length = int(lengths[0])
+    if length > limit:
         raise _RetryableFetchFailure("dashboard response exceeded the QA size limit")
+    content_types = headers.get("content-type", [])
+    content_type = content_types[0].split(";", 1)[0].strip().lower() if len(content_types) == 1 else ""
+    if content_type != "application/json" and not content_type.endswith("+json"):
+        raise _RetryableFetchFailure("dashboard returned a non-JSON content type")
+    if any(
+        "close" in {token.strip() for token in value.lower().split(",")}
+        for value in headers.get("connection", [])
+    ):
+        raise _RetryableFetchFailure("dashboard connection was not persistent")
+    if len(body) > length:
+        raise _RetryableFetchFailure("dashboard returned bytes beyond Content-Length")
+    body_bytes = bytearray(body)
+    while len(body_bytes) < length:
+        chunk = _recv_some(sock, deadline, monotonic, selector_factory)
+        if not chunk:
+            raise _RetryableFetchFailure("dashboard response ended before Content-Length")
+        body_bytes.extend(chunk)
+        if len(body_bytes) > length:
+            raise _RetryableFetchFailure("dashboard returned bytes beyond Content-Length")
     try:
-        return json.loads(body.decode("utf-8"))
+        return json.loads(bytes(body_bytes).decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise _RetryableFetchFailure("dashboard returned invalid JSON") from exc
 
 
 def _fetch_json_transaction(
     url: str, timeout: float, expected_port: int, expected_install_id: str,
-    connection_factory: Callable[..., Any] = _PinnedHTTPConnection,
+    connection_factory: Callable[..., Any] = socket.create_connection,
     monotonic: Callable[[], float] = time.monotonic,
+    selector_factory: Callable[[], Any] = selectors.DefaultSelector,
 ) -> Any:
     """Authenticate status and fetch a target over one pinned direct socket."""
     target = _validate_loopback_url(url, expected_port)
     if not re.fullmatch(r"[0-9a-f]{32}", expected_install_id):
         raise QAFailure("expected dashboard identity is invalid")
     deadline = monotonic() + timeout
-    connection = connection_factory("127.0.0.1", expected_port, timeout=timeout)
+    connection = None
     try:
-        _http_stage_timeout(connection, None, deadline, monotonic)
-        connection.connect()
-        _http_stage_complete(deadline, monotonic)
-        socket_identity = connection.sock
-        if socket_identity is None:
-            raise _RetryableFetchFailure("dashboard connection identity was unavailable")
+        connection = connection_factory(("127.0.0.1", expected_port), _remaining(deadline, monotonic))
+        connection.setblocking(False)
         status = _read_pinned_json(
-            connection, socket_identity, "/api/status", MAX_STATUS_RESPONSE_BYTES, deadline, monotonic,
+            connection, "/api/status", MAX_STATUS_RESPONSE_BYTES, deadline, monotonic, selector_factory,
         )
         if not isinstance(status, dict) or status.get("install_id") != expected_install_id:
             raise _RetryableFetchFailure("dashboard install identity did not match")
-        return _read_pinned_json(connection, socket_identity, target, MAX_RESPONSE_BYTES, deadline, monotonic)
+        return _read_pinned_json(connection, target, MAX_RESPONSE_BYTES, deadline, monotonic, selector_factory)
     except _RetryableFetchFailure:
         raise
-    except (OSError, http.client.HTTPException) as exc:
+    except OSError as exc:
         raise _RetryableFetchFailure("dashboard connection failed") from exc
     finally:
-        connection.close()
+        if connection is not None:
+            connection.close()
 
 
 def _create_install_id(hermes_home: Path) -> str:
@@ -456,36 +490,75 @@ def _wait_json(
     raise QAFailure("dashboard did not become ready")
 
 
-def _spawn_owned(popen: Callable[..., Any], command: Sequence[str], **kwargs: Any) -> OwnedProcess:
+def _spawn_owned(popen: Callable[..., Any], command: Sequence[str], *,
+                 getpgid: Callable[[int], int] = os.getpgid,
+                 getpgrp: Callable[[], int] = os.getpgrp, **kwargs: Any) -> OwnedProcess:
     process = popen(list(command), start_new_session=True, **kwargs)
     pid = getattr(process, "pid", None)
     if not isinstance(pid, int) or pid <= 0:
         raise QAFailure("owned process identity was unavailable")
-    return OwnedProcess(process, pid)
+    try:
+        pgid = getpgid(pid)
+        harness_pgid = getpgrp()
+    except OSError as exc:
+        raise QAFailure("owned process group identity was unavailable") from exc
+    if pgid != pid or pgid <= 0 or pgid == harness_pgid:
+        raise QAFailure("owned process group identity was unsafe")
+    return OwnedProcess(process, pgid, harness_pgid)
+
+
+def _group_exists(pgid: int, killpg: Callable[[int, int], None]) -> bool:
+    try:
+        killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _wait_group_gone(pgid: int, process: Any, deadline: float, monotonic: Callable[[], float],
+                     sleep: Callable[[float], None], killpg: Callable[[int, int], None]) -> bool:
+    while monotonic() < deadline:
+        process.poll()  # Reap the owned leader; descendants are still checked by PGID.
+        if not _group_exists(pgid, killpg):
+            return True
+        sleep(min(0.05, max(0.0, deadline - monotonic())))
+    process.poll()
+    return not _group_exists(pgid, killpg)
 
 
 def _stop_owned(
     owned: OwnedProcess | None, deadline: float, monotonic: Callable[[], float],
     killpg: Callable[[int, int], None] = os.killpg,
+    sleep: Callable[[float], None] = time.sleep,
+    getpgrp: Callable[[], int] = os.getpgrp,
 ) -> None:
-    if owned is None or owned.process.poll() is not None:
+    if owned is None:
         return
-    killpg(owned.pgid, signal.SIGTERM)
+    if owned.pgid <= 0 or getattr(owned.process, "pid", None) != owned.pgid or owned.pgid == getpgrp() or (
+        owned.harness_pgid is not None and owned.pgid == owned.harness_pgid
+    ):
+        raise QAFailure("refusing to signal the harness process group")
+    if not _group_exists(owned.pgid, killpg):
+        return
     try:
-        owned.process.wait(timeout=min(2.0, _remaining(deadline, monotonic)))
+        killpg(owned.pgid, signal.SIGTERM)
+    except ProcessLookupError:
         return
-    except subprocess.TimeoutExpired:
-        pass
-    except QAFailure:
-        pass
-    if owned.process.poll() is None:
-        killpg(owned.pgid, signal.SIGKILL)
-        remaining = max(0.0, deadline - monotonic())
+    term_deadline = min(deadline, monotonic() + 2.0)
+    if not _wait_group_gone(owned.pgid, owned.process, term_deadline, monotonic, sleep, killpg):
         try:
-            owned.process.wait(timeout=min(2.0, remaining))
-        except subprocess.TimeoutExpired as exc:
-            raise QAFailure("owned process group did not exit before cleanup deadline") from exc
-
+            killpg(owned.pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+        if not _wait_group_gone(owned.pgid, owned.process, deadline, monotonic, sleep, killpg):
+            raise QAFailure("owned process group did not exit before cleanup deadline")
+    if owned.process.poll() is not None:
+        try:
+            owned.process.wait(timeout=0)
+        except (subprocess.TimeoutExpired, ChildProcessError):
+            pass
 
 def _assert_snapshot(payload: Any) -> None:
     if not isinstance(payload, dict):
@@ -547,7 +620,10 @@ def run_clean_install(
     monotonic: Callable[[], float] = time.monotonic, which: Callable[..., str | None] = shutil.which,
     killpg: Callable[[int, int], None] = os.killpg, timeout: float = TOTAL_TIMEOUT,
     listener_owned: Callable[[OwnedProcess, int], bool] = _listener_is_owned,
+    getpgid: Callable[[int], int] = os.getpgid, getpgrp: Callable[[], int] = os.getpgrp,
 ) -> dict[str, Any]:
+    if sys.platform != "linux":
+        raise QAFailure("the real clean-install harness is Linux-only")
     repository = github_repo(repository)
     ref = commit_sha(ref)
     source_env = os.environ if environ is None else environ
@@ -559,8 +635,7 @@ def run_clean_install(
     installed = False
     dashboard: OwnedProcess | None = None
     cdp: OwnedProcess | None = None
-    primary_error: Exception | None = None
-    cancellation: KeyboardInterrupt | SystemExit | None = None
+    first_error: BaseException | None = None
     cleanup_errors: list[str] = []
 
     with tempfile.TemporaryDirectory(prefix="hermes-osb-clean-install-") as temporary:
@@ -601,6 +676,7 @@ def run_clean_install(
                     [hermes_executable, "dashboard", "--host", "127.0.0.1", "--port", str(port), "--no-open", "--skip-build"],
                     env=env, cwd=str(ROOT), stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    getpgid=getpgid, getpgrp=getpgrp,
                 )
                 try:
                     ready_deadline = min(operation_deadline, monotonic() + DASHBOARD_READY_TIMEOUT)
@@ -612,7 +688,7 @@ def run_clean_install(
                 except QAFailure as exc:
                     last_start_error = exc
                     retry_cleanup = min(operation_deadline, monotonic() + 2.0)
-                    _stop_owned(dashboard, retry_cleanup, monotonic, killpg)
+                    _stop_owned(dashboard, retry_cleanup, monotonic, killpg, sleep, getpgrp)
                     dashboard = None
                     if monotonic() >= operation_deadline:
                         raise
@@ -641,6 +717,7 @@ def run_clean_install(
                  "--output", str(cdp_output)],
                 env=env, cwd=str(ROOT), stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                getpgid=getpgid, getpgrp=getpgrp,
             )
             try:
                 returncode = cdp.process.wait(timeout=min(COMMAND_TIMEOUT, _remaining(operation_deadline, monotonic)))
@@ -650,37 +727,66 @@ def run_clean_install(
                 raise QAFailure("CDP QA failed")
             _require_alive(dashboard)
             cdp = None
-        except (KeyboardInterrupt, SystemExit) as exc:
-            cancellation = exc
-        except Exception as exc:
-            primary_error = exc
+        except BaseException as exc:
+            first_error = exc
         finally:
             cleanup_deadline = min(deadline, monotonic() + CLEANUP_TIMEOUT)
+
+            def cleanup_step(label: str, operation: Callable[[], Any]) -> None:
+                nonlocal first_error
+                interrupted = False
+                while True:
+                    try:
+                        operation()
+                        if interrupted:
+                            cleanup_errors.append(label + " interrupted")
+                        return
+                    except (KeyboardInterrupt, SystemExit) as exc:
+                        if first_error is None:
+                            first_error = exc
+                        if interrupted or monotonic() >= cleanup_deadline:
+                            cleanup_errors.append(label)
+                            return
+                        interrupted = True
+                    except Exception as exc:
+                        if first_error is None:
+                            first_error = exc
+                        cleanup_errors.append(label)
+                        return
+
             for label, owned in (("owned CDP process", cdp), ("owned dashboard process", dashboard)):
-                try:
-                    _stop_owned(owned, cleanup_deadline, monotonic, killpg)
-                except Exception:
-                    cleanup_errors.append(label)
+                cleanup_step(
+                    label,
+                    lambda selected=owned: _stop_owned(
+                        selected, cleanup_deadline, monotonic, killpg, sleep, getpgrp
+                    ),
+                )
             if installed:
                 for action in ("disable", "remove"):
-                    try:
-                        _run_checked(runner, [hermes_executable, "plugins", action, PLUGIN_ID], env, cleanup_deadline, monotonic)
-                    except Exception:
-                        cleanup_errors.append(f"plugin {action}")
-                try:
-                    if _plugin_entry(_list_plugins(runner, hermes_executable, env, cleanup_deadline, monotonic)) is not None:
-                        cleanup_errors.append("plugin absence confirmation")
-                except Exception:
-                    cleanup_errors.append("plugin absence confirmation")
+                    cleanup_step(
+                        f"plugin {action}",
+                        lambda selected=action: _run_checked(
+                            runner, [hermes_executable, "plugins", selected, PLUGIN_ID],
+                            env, cleanup_deadline, monotonic,
+                        ),
+                    )
 
-        if cancellation is not None:
-            raise cancellation
+                def confirm_absent() -> None:
+                    if _plugin_entry(_list_plugins(
+                        runner, hermes_executable, env, cleanup_deadline, monotonic
+                    )) is not None:
+                        raise QAFailure("plugin remained installed")
+
+                cleanup_step("plugin absence confirmation", confirm_absent)
+
+        if isinstance(first_error, (KeyboardInterrupt, SystemExit)):
+            raise first_error
+        if first_error is not None:
+            if isinstance(first_error, QAFailure):
+                raise first_error
+            raise QAFailure("clean-install QA failed") from first_error
         if cleanup_errors:
-            raise QAFailure("cleanup failed: " + ", ".join(cleanup_errors)) from primary_error
-        if primary_error is not None:
-            if isinstance(primary_error, QAFailure):
-                raise primary_error
-            raise QAFailure("clean-install QA failed") from primary_error
+            raise QAFailure("cleanup failed: " + ", ".join(cleanup_errors))
     return {"passed": True, "plugin": PLUGIN_ID}
 
 

@@ -13,6 +13,7 @@ import json
 import math
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -80,6 +81,47 @@ def free_port() -> int:
 def get_json(url: str, timeout: float = 2.0) -> Any:
     with urllib.request.urlopen(url, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def stop_owned_group(process: Any, pgid: int, timeout: float = 6.0) -> None:
+    """Stop every Chromium process even when the original leader has exited."""
+    if pgid <= 0 or getattr(process, "pid", None) != pgid or pgid == os.getpgrp():
+        raise RuntimeError("refusing to signal the CDP harness process group")
+
+    def exists() -> bool:
+        process.poll()  # Reap the leader while retaining PGID ownership of descendants.
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    if not exists():
+        return
+    deadline = time.monotonic() + timeout
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    term_deadline = min(deadline, time.monotonic() + 2.0)
+    while exists() and time.monotonic() < term_deadline:
+        time.sleep(0.05)
+    if exists():
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+        while exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+    if exists():
+        raise RuntimeError("Chromium process group did not exit before cleanup deadline")
+    if process.poll() is not None:
+        try:
+            process.wait(timeout=0)
+        except (subprocess.TimeoutExpired, ChildProcessError):
+            pass
 
 
 @contextmanager
@@ -856,7 +898,18 @@ def main() -> int:
             [chromium, "--headless=new", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", "--hide-scrollbars", "--remote-allow-origins=*", f"--remote-debugging-port={port}", f"--user-data-dir={profile}", "about:blank"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            start_new_session=True,
         )
+        try:
+            chromium_pgid = os.getpgid(process.pid)
+        except OSError:
+            process.kill()
+            process.wait(timeout=2)
+            raise
+        if chromium_pgid != process.pid or chromium_pgid == os.getpgrp():
+            process.kill()
+            process.wait(timeout=2)
+            raise RuntimeError("Chromium process group identity was unsafe")
         cdp = None
         try:
             deadline = time.time() + 12
@@ -905,11 +958,7 @@ def main() -> int:
         finally:
             if cdp:
                 cdp.close()
-            process.terminate()
-            try:
-                process.wait(timeout=4)
-            except subprocess.TimeoutExpired:
-                process.kill()
+            stop_owned_group(process, chromium_pgid)
             if demo_context:
                 demo_context.__exit__(None, None, None)
 

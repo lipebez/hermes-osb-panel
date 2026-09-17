@@ -359,6 +359,48 @@ class DashboardAssetTests(unittest.TestCase):
         local_auth.assert_not_called()
         chromium_start.assert_not_called()
 
+    def test_cdp_harness_stops_only_its_recorded_chromium_group(self):
+        class ExitedLeader:
+            pid = 43210
+
+            @staticmethod
+            def poll():
+                return 0
+
+            @staticmethod
+            def wait(timeout=None):
+                return 0
+
+        process = ExitedLeader()
+        group_exists = True
+        signals = []
+
+        def killpg(pgid, sig):
+            nonlocal group_exists
+            self.assertEqual(pgid, process.pid)
+            if sig == 0:
+                if not group_exists:
+                    raise ProcessLookupError()
+                return
+            signals.append(sig)
+            if sig == qa_dashboard_cdp.signal.SIGKILL:
+                group_exists = False
+
+        with (
+            patch.object(qa_dashboard_cdp.os, "getpgrp", return_value=999),
+            patch.object(qa_dashboard_cdp.os, "killpg", side_effect=killpg),
+        ):
+            qa_dashboard_cdp.stop_owned_group(process, process.pid, timeout=0)
+
+        self.assertEqual(signals, [qa_dashboard_cdp.signal.SIGTERM, qa_dashboard_cdp.signal.SIGKILL])
+        with (
+            patch.object(qa_dashboard_cdp.os, "getpgrp", return_value=999),
+            patch.object(qa_dashboard_cdp.os, "killpg") as foreign_kill,
+            self.assertRaisesRegex(RuntimeError, "refusing"),
+        ):
+            qa_dashboard_cdp.stop_owned_group(process, process.pid + 1)
+        foreign_kill.assert_not_called()
+
     def test_cdp_harness_accepts_dashboard_session_header_without_logging_it(self):
         qa = (ROOT / "scripts" / "qa_dashboard_cdp.py").read_text(encoding="utf-8")
         self.assertIn('os.environ.get("HERMES_DASHBOARD_SESSION_TOKEN"', qa)

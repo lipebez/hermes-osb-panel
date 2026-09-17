@@ -92,10 +92,15 @@ class Harness:
 
     def killpg(self, pgid, sig):
         process = next(item for item in self.processes if item.pid == pgid)
-        if sig == qa.signal.SIGTERM:
+        if sig == 0:
+            if not process.alive:
+                raise ProcessLookupError()
+        elif sig == qa.signal.SIGTERM:
             process.terminated = True
+            process.alive = False
         elif sig == qa.signal.SIGKILL:
             process.killed = True
+            process.alive = False
 
     def fetch(self, url, timeout):
         self.calls.append(("GET", url))
@@ -143,6 +148,7 @@ class Harness:
             sleep=self.clock.sleep, port_picker=lambda: 43123,
             monotonic=self.clock.monotonic, killpg=self.killpg,
             listener_owned=lambda owned, port: True,
+            getpgid=lambda pid: pid, getpgrp=lambda: 999,
             which=lambda value, path="": (
                 "/opt/hermes/bin/hermes" if value == "hermes" else "/usr/bin/chromium"
             ),
@@ -345,23 +351,15 @@ class CleanInstallTests(unittest.TestCase):
         def keep_plugin(payload, installed):
             return {"plugins": [{"id": PLUGIN, "enabled": True}]}
         harness = Harness(mutate={"list": keep_plugin})
-        with self.assertRaisesRegex(qa.QAFailure, "cleanup"):
+        with self.assertRaisesRegex(qa.QAFailure, "remained installed"):
             harness.execute()
         self.assertTrue(harness.process.terminated)
 
-    def test_owned_process_is_killed_only_after_timeout(self):
+    def test_owned_process_group_is_terminated(self):
         harness = Harness()
-        waits = 0
-        def wait(timeout=None):
-            nonlocal waits
-            waits += 1
-            if waits == 1:
-                raise subprocess.TimeoutExpired("dashboard", timeout or 0)
-            return 0
-        harness.process.wait = wait
         harness.execute()
         self.assertTrue(harness.process.terminated)
-        self.assertTrue(harness.process.killed)
+        self.assertFalse(harness.process.killed)
 
 
 class HardeningRegressionTests(unittest.TestCase):
@@ -382,164 +380,120 @@ class HardeningRegressionTests(unittest.TestCase):
              "LC_ALL": "C.UTF-8", "PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1"},
         )
 
-    class Response:
-        def __init__(
-            self, payload, *, content_type="application/json", status=200, version=11,
-            will_close=False, after_read=None,
-        ):
-            self.body = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
-            self.headers = {"Content-Type": content_type}
-            self.status = status
-            self.version = version
-            self.will_close = will_close
-            self.after_read = after_read
-            self.limits = []
-        def read(self, limit):
-            self.limits.append(limit)
-            if self.after_read:
-                self.after_read()
-            return self.body
+    @staticmethod
+    def wire(payload, **headers):
+        body = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+        fields = {"Content-Type": "application/json", "Content-Length": str(len(body)), **headers}
+        return ("HTTP/1.1 200 OK\r\n" + "".join(f"{k}: {v}\r\n" for k, v in fields.items()) + "\r\n").encode() + body
 
-    class Connection:
-        def __init__(self, responses):
-            self.responses = list(responses)
-            self.sock = None
-            self.socket = mock.Mock()
-            self.connects = 0
-            self.requests = []
-        def connect(self):
-            self.connects += 1
-            self.sock = self.socket
-        def request(self, method, path, *, headers):
-            self.requests.append((method, path, headers))
-        def getresponse(self):
-            return self.responses.pop(0)
+    class FakeSocket:
+        def __init__(self, chunks):
+            self.chunks = list(chunks)
+            self.sent = []
+            self.closed = False
+        def setblocking(self, value):
+            self.blocking = value
+        def send(self, payload):
+            self.sent.append(bytes(payload))
+            return len(payload)
+        def recv(self, limit):
+            return self.chunks.pop(0) if self.chunks else b""
         def close(self):
-            self.sock = None
+            self.closed = True
 
-    class TimedSocket:
-        def __init__(self):
-            self.timeouts = []
-        def settimeout(self, timeout):
-            self.timeouts.append(timeout)
-
-    class TimedConnection(Connection):
-        def __init__(self, responses, clock, delays):
-            super().__init__(responses)
-            self.socket = HardeningRegressionTests.TimedSocket()
+    class FakeSelector:
+        def __init__(self, clock, delays):
             self.clock = clock
-            self.delays = iter(delays)
-            self.timeout = None
-        def _advance(self):
-            self.clock.now += next(self.delays)
-        def connect(self):
-            self._advance()
-            super().connect()
-        def request(self, method, path, *, headers):
-            self._advance()
-            super().request(method, path, headers=headers)
-        def getresponse(self):
-            self._advance()
-            response = super().getresponse()
-            original_read = response.read
-            def read(limit):
-                self._advance()
-                return original_read(limit)
-            response.read = read
-            return response
+            self.delays = delays
+        def __enter__(self): return self
+        def __exit__(self, *args): return None
+        def register(self, sock, event): pass
+        def select(self, timeout):
+            delay = self.delays.pop(0) if self.delays else 0
+            self.clock.now += delay
+            return [] if delay > timeout else [(object(), object())]
 
-    def transaction(self, responses, **kwargs):
-        connection = self.Connection(responses)
-        result = qa._fetch_json_transaction(
-            "http:" + "//" + "127.0.0.1:43123/target", 1.5, 43123, "a" * 32,
-            connection_factory=lambda host, port, timeout: connection, **kwargs,
-        )
-        return result, connection
-
-    def test_http_pins_status_and_target_to_one_http11_connection(self):
-        status = self.Response({"install_id": "a" * 32})
-        target = self.Response({"ok": True})
-        result, connection = self.transaction([status, target])
-        self.assertEqual(result, {"ok": True})
-        self.assertEqual(connection.connects, 1)
-        self.assertEqual([request[1] for request in connection.requests], ["/api/status", "/target"])
-        self.assertEqual(status.limits, [qa.MAX_STATUS_RESPONSE_BYTES + 1])
-        self.assertEqual(target.limits, [qa.MAX_RESPONSE_BYTES + 1])
-
-    def test_http_deadline_is_recomputed_for_every_blocking_stage(self):
+    def transaction(self, chunks, *, timeout=1.5, delays=None):
         clock = Clock()
-        connection = self.TimedConnection(
-            [self.Response({"install_id": "a" * 32}), self.Response({"ok": True})],
-            clock, [0.6, 0.6],
+        sock = self.FakeSocket(chunks)
+        delays = list(delays or [])
+        result = qa._fetch_json_transaction(
+            "http:" + "//" + "127.0.0.1:43123/target", timeout, 43123, "a" * 32,
+            connection_factory=lambda address, connect_timeout: sock,
+            monotonic=clock.monotonic,
+            selector_factory=lambda: self.FakeSelector(clock, delays),
         )
-        with self.assertRaisesRegex(qa.QAFailure, "deadline"):
-            qa._fetch_json_transaction(
-                "http:" + "//" + "127.0.0.1:43123/target", 1.0, 43123, "a" * 32,
-                connection_factory=lambda host, port, timeout: connection, monotonic=clock.monotonic,
-            )
-        self.assertEqual(connection.connects, 1)
-        self.assertEqual([item[1] for item in connection.requests], ["/api/status"])
+        return result, sock, clock
 
-    def test_http_deadline_accepts_exact_boundary_and_short_sequence(self):
-        for delays in ([0.1] * 7, [0.125] * 6 + [0.25]):
-            with self.subTest(delays=delays):
-                clock = Clock()
-                connection = self.TimedConnection(
-                    [self.Response({"install_id": "a" * 32}), self.Response({"ok": True})],
-                    clock, delays,
-                )
-                result = qa._fetch_json_transaction(
-                    "http:" + "//" + "127.0.0.1:43123/target", 1.0, 43123, "a" * 32,
-                    connection_factory=lambda host, port, timeout: connection, monotonic=clock.monotonic,
-                )
-                self.assertEqual(result, {"ok": True})
-                self.assertEqual(len(connection.socket.timeouts), 6)
-                self.assertEqual(connection.timeout, connection.socket.timeouts[-1])
+    def test_http_pins_status_and_target_to_one_socket(self):
+        result, sock, _ = self.transaction([
+            self.wire({"install_id": "a" * 32}), self.wire({"ok": True}),
+        ])
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(len(sock.sent), 2)
+        self.assertIn(b"GET /api/status HTTP/1.1", sock.sent[0])
+        self.assertIn(b"GET /target HTTP/1.1", sock.sent[1])
+        self.assertTrue(sock.closed)
 
-    def test_http_rejects_missing_or_wrong_install_id(self):
-        for payload in ({}, {"install_id": "b" * 32}):
-            with self.subTest(payload=payload), self.assertRaisesRegex(qa.QAFailure, "identity"):
-                self.transaction([self.Response(payload), self.Response({"ok": True})])
+    def test_http_absolute_deadline_rejects_slow_drip_headers_and_body(self):
+        status = self.wire({"install_id": "a" * 32})
+        target = self.wire({"ok": True})
+        for chunks in ([status[:1], status[1:2], status[2:]], [status, target[:-2], target[-2:-1], target[-1:]]):
+            with self.subTest(chunks=len(chunks)), self.assertRaisesRegex(qa.QAFailure, "deadline"):
+                self.transaction(chunks, timeout=.5, delays=[0, .2, .2, .2, .2])
 
-    def test_http_close_after_status_fails_without_reconnect(self):
-        connection = self.Connection([])
-        status = self.Response({"install_id": "a" * 32}, after_read=lambda: setattr(connection, "sock", None))
-        connection.responses = [status, self.Response({"ok": True})]
-        with self.assertRaisesRegex(qa.QAFailure, "connection"):
-            qa._fetch_json_transaction(
-                "http:" + "//" + "127.0.0.1:43123/target", 1, 43123, "a" * 32,
-                connection_factory=lambda host, port, timeout: connection,
-            )
-        self.assertEqual(connection.connects, 1)
-        self.assertEqual([item[1] for item in connection.requests], ["/api/status"])
-
-    def test_http_rejects_socket_or_connection_swap(self):
-        for replacement in (object(), None):
-            connection = self.Connection([])
-            status = self.Response(
-                {"install_id": "a" * 32}, after_read=lambda value=replacement: setattr(connection, "sock", value)
-            )
-            connection.responses = [status, self.Response({"ok": True})]
-            with self.subTest(replacement=replacement), self.assertRaisesRegex(qa.QAFailure, "connection"):
-                qa._fetch_json_transaction(
-                    "http:" + "//" + "127.0.0.1:43123/target", 1, 43123, "a" * 32,
-                    connection_factory=lambda host, port, timeout: connection,
-                )
-
-    def test_http_enforces_status_and_target_limits_and_json_contract(self):
-        cases = (
-            ([self.Response(b"{" + b"x" * qa.MAX_STATUS_RESPONSE_BYTES), self.Response({})], "size"),
-            ([self.Response({"install_id": "a" * 32}), self.Response(b"{" + b"x" * qa.MAX_RESPONSE_BYTES)], "size"),
-            ([self.Response({"install_id": "a" * 32}, content_type="text/html"), self.Response({})], "non-JSON"),
-            ([self.Response({"install_id": "a" * 32}), self.Response({}, content_type="text/html")], "non-JSON"),
-            ([self.Response({}, status=302), self.Response({})], "non-success"),
-            ([self.Response({"install_id": "a" * 32}), self.Response({}, status=503)], "non-success"),
-            ([self.Response({"install_id": "a" * 32}, version=10), self.Response({})], "HTTP/1.1"),
-            ([self.Response({"install_id": "a" * 32}, will_close=True), self.Response({})], "persistent"),
-        )
-        for responses, message in cases:
+    def test_http_rejects_missing_short_long_and_chunked_bodies(self):
+        status = self.wire({"install_id": "a" * 32})
+        cases = {
+            "requires Content-Length": b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
+            "before Content-Length": b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 3\r\n\r\n{}",
+            "beyond Content-Length": b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}x",
+            "transfer encoding": b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nTransfer-Encoding: chunked\r\n\r\n{}",
+        }
+        for message, response in cases.items():
             with self.subTest(message=message), self.assertRaisesRegex(qa.QAFailure, message):
-                self.transaction(responses)
+                self.transaction([status, response])
+
+    def test_http_enforces_complete_header_and_status_line_limits(self):
+        oversized_header = (
+            b"HTTP/1.1 200 OK\r\nX-Fill: "
+            + b"x" * qa.MAX_HEADER_BYTES
+            + b"\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}"
+        )
+        oversized_status = (
+            b"HTTP/1.1 200 " + b"x" * qa.MAX_STATUS_LINE_BYTES
+            + b"\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}"
+        )
+        for response, message in (
+            (oversized_header, "headers exceeded"),
+            (oversized_status, "invalid HTTP status"),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(qa.QAFailure, message):
+                self.transaction([response])
+
+    def test_http_rejects_non_ascii_content_length_and_spaced_close(self):
+        status = self.wire({"install_id": "a" * 32})
+        cases = (
+            (b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \xb2\r\n\r\n{}", "Content-Length"),
+            (b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: keep-alive, close\r\n\r\n{}", "persistent"),
+        )
+        for response, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(qa.QAFailure, message):
+                self.transaction([status, response])
+
+    def test_http_rejects_protocol_status_type_size_and_identity(self):
+        status = self.wire({"install_id": "a" * 32})
+        cases = [
+            (self.wire({}), "identity"),
+            (b"HTTP/1.1 302 Found\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}", "non-success"),
+            (b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}", "HTTP/1.1"),
+            (b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 2\r\n\r\n{}", "non-JSON"),
+            (b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1000001\r\n\r\n", "size"),
+        ]
+        for response, message in cases:
+            chunks = [response] if message == "identity" else [status, response]
+            with self.subTest(message=message), self.assertRaisesRegex(qa.QAFailure, message):
+                self.transaction(chunks)
 
     def test_install_id_is_random_valid_and_private(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -584,11 +538,6 @@ class HardeningRegressionTests(unittest.TestCase):
             )
         self.assertEqual(len(attempts), 1)
 
-    def test_pinned_connection_refuses_a_second_connect_without_network(self):
-        connection = qa._PinnedHTTPConnection("127.0.0.1", 43123)
-        connection._pin_connect_attempted = True
-        with self.assertRaises(qa.http.client.CannotSendRequest):
-            connection.connect()
 
     def test_http_rejects_every_destination_except_expected_ipv4_loopback(self):
         bad = (
@@ -602,13 +551,54 @@ class HardeningRegressionTests(unittest.TestCase):
                 qa._fetch_json_transaction(url, 1, 43123, "a" * 32, connection_factory=factory)
         factory.assert_not_called()
 
-    def test_stop_signals_only_the_recorded_owned_group(self):
+    def test_stop_signals_group_after_leader_death_and_handles_missing_group(self):
         process = Process()
+        process.alive = False
         signals = []
-        qa._stop_owned(qa.OwnedProcess(process, process.pid), 5, lambda: 0, lambda pgid, sig: signals.append((pgid, sig)))
-        self.assertEqual(signals, [(process.pid, qa.signal.SIGTERM)])
+        exists = True
+        def killpg(pgid, sig):
+            nonlocal exists
+            if sig == 0 and not exists:
+                raise ProcessLookupError()
+            signals.append((pgid, sig))
+            if sig == qa.signal.SIGTERM:
+                exists = False
+        qa._stop_owned(qa.OwnedProcess(process, process.pid, 999), 5, lambda: 0,
+                       killpg, lambda seconds: None, lambda: 999)
+        self.assertIn((process.pid, qa.signal.SIGTERM), signals)
+
+        signals.clear()
+        qa._stop_owned(qa.OwnedProcess(process, process.pid, 999), 5, lambda: 0,
+                       lambda pgid, sig: (_ for _ in ()).throw(ProcessLookupError()),
+                       lambda seconds: None, lambda: 999)
+        self.assertEqual(signals, [])
         with self.assertRaises(AttributeError):
             qa._stop_owned(Process(), 5, lambda: 0, lambda pgid, sig: None)  # type: ignore[arg-type]
+
+        foreign = Process()
+        with self.assertRaisesRegex(qa.QAFailure, "refusing"):
+            qa._stop_owned(qa.OwnedProcess(foreign, foreign.pid + 1, 999), 5, lambda: 0,
+                           lambda pgid, sig: self.fail("must not signal a foreign group"),
+                           lambda seconds: None, lambda: 999)
+
+    def test_stop_kills_group_when_descendant_ignores_term(self):
+        clock = Clock()
+        process = Process()
+        process.alive = False
+        exists = True
+        signals = []
+        def killpg(pgid, sig):
+            nonlocal exists
+            if sig == 0:
+                if not exists:
+                    raise ProcessLookupError()
+                return
+            signals.append(sig)
+            if sig == qa.signal.SIGKILL:
+                exists = False
+        qa._stop_owned(qa.OwnedProcess(process, process.pid, 999), 5, clock.monotonic,
+                       killpg, clock.sleep, lambda: 999)
+        self.assertEqual(signals, [qa.signal.SIGTERM, qa.signal.SIGKILL])
 
     def test_global_deadline_bounds_commands_and_preserves_cancellation(self):
         clock = Clock()
@@ -633,6 +623,46 @@ class HardeningRegressionTests(unittest.TestCase):
             harness.execute()
         self.assertFalse(harness.installed)
 
+    def test_cleanup_cancellation_at_each_stage_does_not_skip_later_stages(self):
+        for stage, cancellation_type in (("stop", KeyboardInterrupt), ("disable", SystemExit),
+                                         ("remove", KeyboardInterrupt), ("list", SystemExit)):
+            with self.subTest(stage=stage):
+                harness = Harness()
+                original_run = harness.run
+                original_killpg = harness.killpg
+                fired = False
+                list_calls = 0
+
+                def run(command, **kwargs):
+                    nonlocal fired, list_calls
+                    action = command[2] if len(command) > 2 and command[1] == "plugins" else ""
+                    if action == "list":
+                        list_calls += 1
+                    should_interrupt = (
+                        stage == "list" and action == "list" and list_calls >= 2
+                    ) or (stage != "list" and action == stage)
+                    if not fired and should_interrupt:
+                        fired = True
+                        raise cancellation_type()
+                    return original_run(command, **kwargs)
+
+                def killpg(pgid, sig):
+                    nonlocal fired
+                    if stage == "stop" and not fired and sig == 0:
+                        fired = True
+                        raise cancellation_type()
+                    return original_killpg(pgid, sig)
+
+                harness.run = run
+                harness.killpg = killpg
+                with self.assertRaises(cancellation_type):
+                    harness.execute()
+                actions = [" ".join(call) for call in harness.calls]
+                self.assertTrue(any("plugins disable" in action for action in actions))
+                self.assertTrue(any("plugins remove" in action for action in actions))
+                self.assertGreaterEqual(sum("plugins list --json" in action for action in actions), 2)
+                self.assertFalse(harness.installed)
+
     def test_cdp_is_owned_and_cleaned_after_timeout(self):
         harness = Harness()
         original = harness.popen
@@ -646,7 +676,7 @@ class HardeningRegressionTests(unittest.TestCase):
             harness.execute()
         cdp = harness.processes[-1]
         self.assertTrue(cdp.terminated)
-        self.assertTrue(cdp.killed)
+        self.assertFalse(cdp.killed)
         self.assertTrue(harness.assert_session)
 
     def test_port_retry_accepts_only_the_live_new_process(self):
@@ -673,6 +703,7 @@ class HardeningRegressionTests(unittest.TestCase):
             port_picker=lambda: next(ports), monotonic=harness.clock.monotonic,
             killpg=harness.killpg,
             listener_owned=lambda owned, port: True,
+            getpgid=lambda pid: pid, getpgrp=lambda: 999,
             which=lambda value, path="": "/opt/hermes" if value == "hermes" else "/opt/chromium",
         )
         self.assertTrue(result["passed"])
