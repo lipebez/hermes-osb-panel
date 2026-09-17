@@ -228,19 +228,21 @@ def _git_archive_head(
     max_archive_bytes: int = MAX_ARCHIVE_BYTES,
 ) -> bytes | None:
     """Read git archive incrementally with a hard deadline and bounded cleanup."""
-    process = subprocess.Popen(
-        ["git", "archive", "--format=tar", "HEAD"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    pgid = process.pid
+    process: subprocess.Popen[bytes] | None = None
+    pgid: int | None = None
     stdout = None
     selector = None
     failure: BaseException | None = None
     failure_traceback = None
     result: bytes | None = None
     try:
+        process = subprocess.Popen(
+            ["git", "archive", "--format=tar", "HEAD"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        pgid = process.pid
         assert process.stdout is not None
         stdout = process.stdout
         selector = selectors.DefaultSelector()
@@ -276,53 +278,65 @@ def _git_archive_head(
             except BaseException as error:
                 if failure is None:
                     failure, failure_traceback = error, error.__traceback__
-        if stdout is None:
-            stdout = process.stdout
-        if stdout is not None:
+        if process is not None:
+            if stdout is None:
+                try:
+                    stdout = process.stdout
+                except BaseException as error:
+                    if failure is None:
+                        failure, failure_traceback = error, error.__traceback__
+            if stdout is not None:
+                try:
+                    stdout.close()
+                except BaseException as error:
+                    if failure is None:
+                        failure, failure_traceback = error, error.__traceback__
+            if pgid is None:
+                try:
+                    pgid = process.pid
+                except BaseException as error:
+                    if failure is None:
+                        failure, failure_traceback = error, error.__traceback__
+            if pgid is not None:
+                try:
+                    _signal_process_group(pgid, signal.SIGTERM)
+                except BaseException as error:
+                    if failure is None:
+                        failure, failure_traceback = error, error.__traceback__
+                try:
+                    _bounded_wait(process, cleanup_grace_seconds)
+                except BaseException as error:
+                    if failure is None:
+                        failure, failure_traceback = error, error.__traceback__
+                group_absent = False
+                try:
+                    group_absent = _wait_process_group_absent(pgid, cleanup_grace_seconds)
+                except BaseException as error:
+                    if failure is None:
+                        failure, failure_traceback = error, error.__traceback__
+                if not group_absent:
+                    try:
+                        _signal_process_group(pgid, signal.SIGKILL)
+                    except BaseException as error:
+                        if failure is None:
+                            failure, failure_traceback = error, error.__traceback__
+                    try:
+                        group_absent = _wait_process_group_absent(pgid, cleanup_grace_seconds)
+                    except BaseException as error:
+                        if failure is None:
+                            failure, failure_traceback = error, error.__traceback__
+                    if not group_absent and failure is None:
+                        error = RuntimeError("release archive process group cleanup could not be confirmed")
+                        failure, failure_traceback = error, error.__traceback__
             try:
-                stdout.close()
+                reaped = _bounded_wait(process, cleanup_grace_seconds)
             except BaseException as error:
                 if failure is None:
                     failure, failure_traceback = error, error.__traceback__
-        try:
-            _signal_process_group(pgid, signal.SIGTERM)
-        except BaseException as error:
-            if failure is None:
-                failure, failure_traceback = error, error.__traceback__
-        try:
-            _bounded_wait(process, cleanup_grace_seconds)
-        except BaseException as error:
-            if failure is None:
-                failure, failure_traceback = error, error.__traceback__
-        group_absent = False
-        try:
-            group_absent = _wait_process_group_absent(pgid, cleanup_grace_seconds)
-        except BaseException as error:
-            if failure is None:
-                failure, failure_traceback = error, error.__traceback__
-        if not group_absent:
-            try:
-                _signal_process_group(pgid, signal.SIGKILL)
-            except BaseException as error:
-                if failure is None:
+            else:
+                if reaped is None and failure is None:
+                    error = RuntimeError("release archive process cleanup could not be confirmed")
                     failure, failure_traceback = error, error.__traceback__
-            try:
-                group_absent = _wait_process_group_absent(pgid, cleanup_grace_seconds)
-            except BaseException as error:
-                if failure is None:
-                    failure, failure_traceback = error, error.__traceback__
-            if not group_absent and failure is None:
-                error = RuntimeError("release archive process group cleanup could not be confirmed")
-                failure, failure_traceback = error, error.__traceback__
-        try:
-            reaped = _bounded_wait(process, cleanup_grace_seconds)
-        except BaseException as error:
-            if failure is None:
-                failure, failure_traceback = error, error.__traceback__
-        else:
-            if reaped is None and failure is None:
-                error = RuntimeError("release archive process cleanup could not be confirmed")
-                failure, failure_traceback = error, error.__traceback__
     if failure is not None:
         raise failure.with_traceback(failure_traceback)
     return result

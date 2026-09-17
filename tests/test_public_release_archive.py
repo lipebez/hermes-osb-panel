@@ -390,6 +390,76 @@ class GitArchiveProcessTests(unittest.TestCase):
         self.assert_process_group_absent(child.pid)
         self.assertLess(elapsed, 1.0)
 
+    def test_popen_baseexception_is_preserved_without_cleanup(self):
+        marker = BaseException("spawn failed")
+        with (
+            mock.patch("scripts.check_public_release.subprocess.Popen", side_effect=marker),
+            mock.patch("scripts.check_public_release._signal_process_group") as signal_group,
+            mock.patch("scripts.check_public_release._bounded_wait") as bounded_wait,
+            mock.patch("scripts.check_public_release._wait_process_group_absent") as wait_group,
+        ):
+            caught: BaseException | None = None
+            try:
+                _git_archive_head()
+            except BaseException as error:
+                caught = error
+
+        self.assertIs(caught, marker)
+        signal_group.assert_not_called()
+        bounded_wait.assert_not_called()
+        wait_group.assert_not_called()
+
+    def test_pid_baseexception_after_popen_is_preserved_and_cleans_up(self):
+        real_popen = subprocess.Popen
+        children: list[subprocess.Popen[bytes]] = []
+        wrappers: list[object] = []
+        marker = BaseException("pid lookup failed")
+
+        class PidFailsOnce:
+            def __init__(self, child: subprocess.Popen[bytes]) -> None:
+                self.child = child
+                self.stdout = child.stdout
+                self.pid_reads = 0
+
+            @property
+            def pid(self) -> int:
+                self.pid_reads += 1
+                if self.pid_reads == 1:
+                    raise marker
+                return self.child.pid
+
+            def poll(self) -> int | None:
+                return self.child.poll()
+
+            def wait(self, timeout: float | None = None) -> int:
+                return self.child.wait(timeout=timeout)
+
+        def replacement(_command: object, **options: Any) -> object:
+            child = cast(subprocess.Popen[bytes], real_popen(
+                [sys.executable, "-c", self._descendant_source(b"ready")], **options
+            ))
+            wrapper = PidFailsOnce(child)
+            children.append(child)
+            wrappers.append(wrapper)
+            return wrapper
+
+        caught: BaseException | None = None
+        with mock.patch("scripts.check_public_release.subprocess.Popen", side_effect=replacement):
+            try:
+                _git_archive_head(cleanup_grace_seconds=0.1)
+            except BaseException as error:
+                caught = error
+
+        self.assertIs(caught, marker)
+        self.assertEqual(len(wrappers), 1)
+        child = children[0]
+        self.assertIsNotNone(child.stdout)
+        stdout = child.stdout
+        assert stdout is not None
+        self.assertTrue(stdout.closed)
+        self.assertIsNotNone(child.poll())
+        self.assert_process_group_absent(child.pid)
+
     def test_selector_baseexception_after_popen_is_preserved_and_cleans_up(self):
         real_popen = subprocess.Popen
         children: list[subprocess.Popen[bytes]] = []
