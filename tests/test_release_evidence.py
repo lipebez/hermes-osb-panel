@@ -15,12 +15,14 @@ from scripts.build_release_evidence import build_evidence, encode_evidence, main
 SHA = "0123456789abcdef0123456789abcdef01234567"
 HERMES_SHA = "89abcdef0123456789abcdef0123456789abcdef"
 OSB_SHA = "fedcba9876543210fedcba9876543210fedcba98"
+ARCHIVE_SHA256 = "a" * 64
 
 
 def safe_inputs() -> dict[str, object]:
     return {
         "project_version": "3.1.0",
         "candidate_sha": SHA,
+        "candidate_archive_sha256": ARCHIVE_SHA256,
         "tested_hermes_version": "0.21.3",
         "tested_hermes_ref": HERMES_SHA,
         "tested_osb_version": "1.4.2",
@@ -28,6 +30,7 @@ def safe_inputs() -> dict[str, object]:
         "static_gate_passed": True,
         "unit_gate_passed": True,
         "archive_gate_passed": True,
+        "doctor_gate_passed": True,
         "tests_run": 72,
         "tests_passed": 72,
         "tests_failed": 0,
@@ -38,6 +41,7 @@ def cli_args(output: Path) -> list[str]:
     return [
         "--project-version", "3.1.0",
         "--candidate-sha", SHA,
+        "--candidate-archive-sha256", ARCHIVE_SHA256,
         "--tested-hermes-version", "0.21.3",
         "--tested-hermes-ref", HERMES_SHA,
         "--tested-osb-version", "1.4.2",
@@ -45,6 +49,7 @@ def cli_args(output: Path) -> list[str]:
         "--static-gate-passed", "true",
         "--unit-gate-passed", "true",
         "--archive-gate-passed", "true",
+        "--doctor-gate-passed", "true",
         "--tests-run", "72",
         "--tests-passed", "72",
         "--tests-failed", "0",
@@ -60,6 +65,8 @@ class ReleaseEvidenceTests(unittest.TestCase):
             evidence,
             {
                 "candidate_sha": SHA,
+                "candidate_archive_sha256": ARCHIVE_SHA256,
+                "doctor_gate_passed": True,
                 "gates": {
                     "archive_passed": True,
                     "static_passed": True,
@@ -92,6 +99,22 @@ class ReleaseEvidenceTests(unittest.TestCase):
                 with self.assertRaises(ValueError) as caught:
                     build_evidence(**values)
                 self.assertNotIn(unsafe, str(caught.exception))
+
+    def test_rejects_malformed_archive_digest(self):
+        for digest in ("a" * 63, "a" * 65, "A" * 64, "not-a-digest"):
+            with self.subTest(digest=digest):
+                values = safe_inputs()
+                values["candidate_archive_sha256"] = digest
+                with self.assertRaises(ValueError):
+                    build_evidence(**values)
+
+    def test_requires_literal_true_doctor_gate(self):
+        for value in (False, 1, "true", None):
+            with self.subTest(value=value):
+                values = safe_inputs()
+                values["doctor_gate_passed"] = value
+                with self.assertRaises(ValueError):
+                    build_evidence(**values)
 
     def test_rejects_private_or_artifact_shaped_text(self):
         private_home = "/" + "home/private-user/project"
@@ -226,6 +249,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
             result = main([
                 "--project-version", "3.1.0",
                 "--candidate-sha", SHA,
+                "--candidate-archive-sha256", ARCHIVE_SHA256,
                 "--tested-hermes-version", "0.21.3",
                 "--tested-hermes-ref", HERMES_SHA,
                 "--tested-osb-version", "1.4.2",
@@ -233,6 +257,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
                 "--static-gate-passed", "true",
                 "--unit-gate-passed", "true",
                 "--archive-gate-passed", "true",
+                "--doctor-gate-passed", "true",
                 "--tests-run", "72",
                 "--tests-passed", "72",
                 "--tests-failed", "0",

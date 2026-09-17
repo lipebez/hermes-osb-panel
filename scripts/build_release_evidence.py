@@ -26,6 +26,7 @@ _VERSION = re.compile(
     r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
 )
 _SHA = re.compile(r"[0-9a-f]{40}")
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 _CLI_ERROR = "error: unable to create release evidence\n"
 
 
@@ -37,6 +38,12 @@ def _validated_version(field: str, value: object) -> str:
 
 def _validated_sha(field: str, value: object) -> str:
     if not isinstance(value, str) or _SHA.fullmatch(value) is None:
+        raise ValueError(f"invalid {field}")
+    return value
+
+
+def _validated_sha256(field: str, value: object) -> str:
+    if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
         raise ValueError(f"invalid {field}")
     return value
 
@@ -57,6 +64,7 @@ def build_evidence(
     *,
     project_version: object,
     candidate_sha: object,
+    candidate_archive_sha256: object,
     tested_hermes_version: object,
     tested_hermes_ref: object,
     tested_osb_version: object,
@@ -64,6 +72,7 @@ def build_evidence(
     static_gate_passed: object,
     unit_gate_passed: object,
     archive_gate_passed: object,
+    doctor_gate_passed: object,
     tests_run: object,
     tests_passed: object,
     tests_failed: object,
@@ -71,6 +80,7 @@ def build_evidence(
     """Return the fixed release-evidence schema from safe scalar inputs only."""
     project = _validated_version("project_version", project_version)
     candidate = _validated_sha("candidate_sha", candidate_sha)
+    archive_sha256 = _validated_sha256("candidate_archive_sha256", candidate_archive_sha256)
     hermes_version = _validated_version("tested_hermes_version", tested_hermes_version)
     hermes_ref = _validated_sha("tested_hermes_ref", tested_hermes_ref)
     osb_version = _validated_version("tested_osb_version", tested_osb_version)
@@ -78,6 +88,7 @@ def build_evidence(
     static_passed = _validated_bool("static_gate_passed", static_gate_passed)
     unit_passed = _validated_bool("unit_gate_passed", unit_gate_passed)
     archive_passed = _validated_bool("archive_gate_passed", archive_gate_passed)
+    doctor_passed = _validated_bool("doctor_gate_passed", doctor_gate_passed)
     run = _validated_count("tests_run", tests_run)
     passed = _validated_count("tests_passed", tests_passed)
     failed = _validated_count("tests_failed", tests_failed)
@@ -86,9 +97,13 @@ def build_evidence(
         raise ValueError("inconsistent test counts")
     if unit_passed != (failed == 0):
         raise ValueError("unit gate contradicts test counts")
+    if doctor_passed is not True:
+        raise ValueError("doctor gate did not pass")
 
     return {
+        "candidate_archive_sha256": archive_sha256,
         "candidate_sha": candidate,
+        "doctor_gate_passed": doctor_passed,
         "gates": {
             "archive_passed": archive_passed,
             "static_passed": static_passed,
@@ -211,6 +226,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = _BoundedArgumentParser(description=__doc__)
     parser.add_argument("--project-version", required=True)
     parser.add_argument("--candidate-sha", required=True)
+    parser.add_argument("--candidate-archive-sha256", required=True)
     parser.add_argument("--tested-hermes-version", required=True)
     parser.add_argument("--tested-hermes-ref", required=True)
     parser.add_argument("--tested-osb-version", required=True)
@@ -218,6 +234,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--static-gate-passed", required=True, type=_boolean)
     parser.add_argument("--unit-gate-passed", required=True, type=_boolean)
     parser.add_argument("--archive-gate-passed", required=True, type=_boolean)
+    parser.add_argument("--doctor-gate-passed", required=True, type=_boolean)
     parser.add_argument("--tests-run", required=True, type=int)
     parser.add_argument("--tests-passed", required=True, type=int)
     parser.add_argument("--tests-failed", required=True, type=int)
@@ -231,6 +248,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         evidence = build_evidence(
             project_version=args.project_version,
             candidate_sha=args.candidate_sha,
+            candidate_archive_sha256=args.candidate_archive_sha256,
             tested_hermes_version=args.tested_hermes_version,
             tested_hermes_ref=args.tested_hermes_ref,
             tested_osb_version=args.tested_osb_version,
@@ -238,6 +256,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             static_gate_passed=args.static_gate_passed,
             unit_gate_passed=args.unit_gate_passed,
             archive_gate_passed=args.archive_gate_passed,
+            doctor_gate_passed=args.doctor_gate_passed,
             tests_run=args.tests_run,
             tests_passed=args.tests_passed,
             tests_failed=args.tests_failed,
