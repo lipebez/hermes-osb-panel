@@ -141,6 +141,7 @@ class Harness:
             runner=self.run, popen=self.popen, fetch_json=self.fetch,
             sleep=self.clock.sleep, port_picker=lambda: 43123,
             monotonic=self.clock.monotonic, killpg=self.killpg,
+            listener_owned=lambda owned, port: True,
             which=lambda value, path="": (
                 "/opt/hermes/bin/hermes" if value == "hermes" else "/usr/bin/chromium"
             ),
@@ -182,7 +183,7 @@ class CleanInstallTests(unittest.TestCase):
             Process(),
             clock.sleep,
             qa._dashboard_plugin_present,
-            timeout=1.0, monotonic=clock.monotonic,
+            timeout=1.0, monotonic=clock.monotonic, listener_owned=lambda: True,
         )
 
         self.assertTrue(qa._dashboard_plugin_present(result))
@@ -211,7 +212,7 @@ class CleanInstallTests(unittest.TestCase):
                 Process(),
                 clock.sleep,
                 qa._dashboard_plugin_present,
-                timeout=0.25, monotonic=clock.monotonic,
+                timeout=0.25, monotonic=clock.monotonic, listener_owned=lambda: True,
             )
         self.assertEqual(len(calls), 3)
 
@@ -264,6 +265,7 @@ class CleanInstallTests(unittest.TestCase):
                 clock.sleep,
                 qa._dashboard_plugin_present,
                 timeout=10.0, max_failures=3, monotonic=clock.monotonic,
+                listener_owned=lambda: True,
             )
         self.assertEqual(len(calls), 3)
 
@@ -497,6 +499,7 @@ class HardeningRegressionTests(unittest.TestCase):
             popen=harness.popen, fetch_json=harness.fetch, sleep=harness.clock.sleep,
             port_picker=lambda: next(ports), monotonic=harness.clock.monotonic,
             killpg=harness.killpg,
+            listener_owned=lambda owned, port: True,
             which=lambda value, path="": "/opt/hermes" if value == "hermes" else "/opt/chromium",
         )
         self.assertTrue(result["passed"])
@@ -505,6 +508,91 @@ class HardeningRegressionTests(unittest.TestCase):
         self.assertIn("43123", starts[0])
         self.assertIn("43124", starts[1])
         self.assertTrue(second.terminated)
+
+    def test_wait_json_never_fetches_from_a_foreign_listener(self):
+        clock = Clock()
+        calls = []
+        ownership = iter((False, False, False))
+        with self.assertRaisesRegex(qa.QAFailure, "did not become ready"):
+            qa._wait_json(
+                lambda url, timeout: calls.append(url) or [{"name": PLUGIN}],
+                "http:" + "//" + "127.0.0.1:43123/plugins", Process(), clock.sleep,
+                qa._dashboard_plugin_present, timeout=0.25,
+                monotonic=clock.monotonic,
+                listener_owned=lambda: next(ownership, False),
+            )
+        self.assertEqual(calls, [])
+
+    def test_wait_json_discards_json_if_listener_ownership_changes(self):
+        clock = Clock()
+        checks = iter((True, False, False, False))
+        calls = []
+        with self.assertRaisesRegex(qa.QAFailure, "did not become ready"):
+            qa._wait_json(
+                lambda url, timeout: calls.append(url) or [{"name": PLUGIN}],
+                "http:" + "//" + "127.0.0.1:43123/plugins", Process(), clock.sleep,
+                qa._dashboard_plugin_present, timeout=0.25,
+                monotonic=clock.monotonic,
+                listener_owned=lambda: next(checks, False),
+            )
+        self.assertEqual(len(calls), 1)
+
+    def test_listener_owned_accepts_descendant_in_owned_group(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            proc = Path(temporary)
+            (proc / "net").mkdir()
+            (proc / "41000" / "fd").mkdir(parents=True)
+            (proc / "41001" / "fd").mkdir(parents=True)
+            (proc / "41000" / "stat").write_text(
+                "41000 (dashboard) S 1 41000 41000 0\n", encoding="ascii"
+            )
+            (proc / "41001" / "stat").write_text(
+                "41001 (worker) S 41000 41000 41000 0\n", encoding="ascii"
+            )
+            (proc / "41001" / "fd" / "7").symlink_to("socket:[98765]")
+            (proc / "net" / "tcp").write_text(
+                "  sl  local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n"
+                "   0: 0100007F:A873 00000000:0000 0A 0:0 00:0 0 1000 0 98765\n",
+                encoding="ascii",
+            )
+            (proc / "net" / "tcp6").write_text(
+                "  sl  local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n",
+                encoding="ascii",
+            )
+            owned = qa.OwnedProcess(Process(), 41000)
+            self.assertTrue(qa._listener_is_owned(owned, 43123, proc_root=proc, platform="linux"))
+
+    def test_listener_owned_rejects_foreign_dead_and_unprovable_cases(self):
+        def build(proc: Path, *, pgid="42000", tcp_inode="98765", malformed=False):
+            (proc / "net").mkdir()
+            (proc / "42000" / "fd").mkdir(parents=True)
+            (proc / "42000" / "stat").write_text(
+                "not a stat\n" if malformed else f"42000 (server) S 1 {pgid} {pgid} 0\n",
+                encoding="ascii",
+            )
+            (proc / "42000" / "fd" / "7").symlink_to("socket:[98765]")
+            header = "  sl  local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n"
+            (proc / "net" / "tcp").write_text(
+                header + f"   0: 0100007F:A873 00000000:0000 0A 0:0 00:0 0 1000 0 {tcp_inode}\n",
+                encoding="ascii",
+            )
+            (proc / "net" / "tcp6").write_text(header, encoding="ascii")
+
+        for case in ("foreign", "dead", "missing", "malformed", "non_linux"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                proc = Path(temporary)
+                if case != "missing":
+                    build(proc, pgid="42000" if case == "foreign" else "41000", malformed=case == "malformed")
+                process = Process()
+                if case == "dead":
+                    process.alive = False
+                owned = qa.OwnedProcess(process, 41000)
+                self.assertFalse(
+                    qa._listener_is_owned(
+                        owned, 43123, proc_root=proc,
+                        platform="darwin" if case == "non_linux" else "linux",
+                    )
+                )
 
     def test_ci_runs_discovery_once_without_duplicate_focused_step(self):
         ci = (Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")

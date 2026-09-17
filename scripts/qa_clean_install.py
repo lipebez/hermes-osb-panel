@@ -33,6 +33,7 @@ MAX_PORT_ATTEMPTS = 3
 SAFE_PATH = "/usr/bin:/bin"
 _REPO_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,99})/[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,99})\Z")
 _SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
+_SOCKET_INODE_RE = re.compile(r"socket:\[([1-9][0-9]*)\]\Z")
 
 
 class QAFailure(RuntimeError):
@@ -162,6 +163,107 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
+def _parse_proc_stat(text: str, expected_pid: int) -> tuple[int, int]:
+    """Return (process group, session) without trusting spaces in comm."""
+    close = text.rfind(")")
+    open_ = text.find("(")
+    if open_ <= 0 or close <= open_ or not text[close + 1 :].startswith(" "):
+        raise ValueError("invalid proc stat")
+    if int(text[:open_].strip()) != expected_pid:
+        raise ValueError("proc stat pid mismatch")
+    fields = text[close + 2 :].split()
+    if len(fields) < 4 or len(fields[0]) != 1:
+        raise ValueError("incomplete proc stat")
+    return int(fields[2]), int(fields[3])
+
+
+def _listening_loopback_inodes(text: str, port: int, *, ipv6: bool) -> set[int]:
+    lines = text.splitlines()
+    if not lines or "local_address" not in lines[0] or "inode" not in lines[0]:
+        raise ValueError("invalid proc net header")
+    expected_addresses = (
+        {"00000000000000000000000001000000", "0000000000000000FFFF00000100007F"}
+        if ipv6 else {"0100007F"}
+    )
+    result: set[int] = set()
+    for line in lines[1:]:
+        if not line.strip():
+            continue
+        fields = line.split()
+        if len(fields) < 10 or ":" not in fields[1]:
+            raise ValueError("invalid proc net row")
+        address, port_hex = fields[1].rsplit(":", 1)
+        expected_address_length = 32 if ipv6 else 8
+        hexadecimal = "0123456789ABCDEFabcdef"
+        if (
+            len(address) != expected_address_length or len(port_hex) != 4 or len(fields[3]) != 2
+            or any(char not in hexadecimal for char in address + port_hex + fields[3])
+            or not fields[9].isdecimal()
+        ):
+            raise ValueError("invalid proc net address")
+        local_port = int(port_hex, 16)
+        inode = int(fields[9])
+        if fields[3] == "0A" and address.upper() in expected_addresses and local_port == port:
+            if inode <= 0:
+                raise ValueError("invalid listening inode")
+            result.add(inode)
+    return result
+
+
+def _listener_is_owned(
+    owned: OwnedProcess, port: int, *, proc_root: Path = Path("/proc"), platform: str = sys.platform,
+) -> bool:
+    """Prove a loopback LISTEN socket belongs to the owned session, or fail closed."""
+    if platform != "linux" or owned.process.poll() is not None or owned.pgid <= 0:
+        return False
+    try:
+        members: list[Path] = []
+        root_seen = False
+        for entry in proc_root.iterdir():
+            if not entry.name.isdecimal() or not entry.is_dir():
+                continue
+            pid = int(entry.name)
+            try:
+                pgid, session = _parse_proc_stat((entry / "stat").read_text(encoding="ascii"), pid)
+            except FileNotFoundError:
+                continue
+            if pgid == owned.pgid and session == owned.pgid:
+                members.append(entry)
+                root_seen = root_seen or pid == owned.pgid
+        if not root_seen or not members:
+            return False
+
+        owned_inodes: set[int] = set()
+        for member in members:
+            for descriptor in (member / "fd").iterdir():
+                try:
+                    target = os.readlink(descriptor)
+                except FileNotFoundError:
+                    continue
+                match = _SOCKET_INODE_RE.fullmatch(target)
+                if match:
+                    owned_inodes.add(int(match.group(1)))
+
+        listeners = _listening_loopback_inodes(
+            (proc_root / "net" / "tcp").read_text(encoding="ascii"), port, ipv6=False,
+        )
+        listeners.update(
+            _listening_loopback_inodes(
+                (proc_root / "net" / "tcp6").read_text(encoding="ascii"), port, ipv6=True,
+            )
+        )
+        return bool(owned_inodes & listeners)
+    except (OSError, UnicodeError, ValueError):
+        return False
+
+
+def _has_owned_listener(probe: Callable[[], bool]) -> bool:
+    try:
+        return probe() is True
+    except Exception:
+        return False
+
+
 def _entries(payload: Any) -> list[dict[str, Any]]:
     if isinstance(payload, list):
         return [item for item in payload if isinstance(item, dict)]
@@ -223,6 +325,7 @@ def _wait_json(
     sleep: Callable[[float], None], condition: Callable[[Any], bool], *, deadline: float | None = None,
     timeout: float = DASHBOARD_READY_TIMEOUT, max_failures: int = MAX_TRANSIENT_FETCH_FAILURES,
     monotonic: Callable[[], float] = time.monotonic,
+    listener_owned: Callable[[], bool],
 ) -> Any:
     if deadline is None:
         deadline = monotonic() + timeout
@@ -231,19 +334,20 @@ def _wait_json(
         if process.poll() is not None:
             raise QAFailure("dashboard exited before becoming ready")
         remaining = _remaining(deadline, monotonic)
-        try:
-            payload = fetch_json(url, min(2.0, remaining))
-        except QAFailure:
-            raise
-        except Exception:
-            failures += 1
-            if failures >= max_failures:
-                raise QAFailure("dashboard endpoint was repeatedly unavailable")
-        else:
-            if condition(payload):
+        if _has_owned_listener(listener_owned):
+            try:
+                payload = fetch_json(url, min(2.0, remaining))
+            except QAFailure:
+                raise
+            except Exception:
+                failures += 1
+                if failures >= max_failures:
+                    raise QAFailure("dashboard endpoint was repeatedly unavailable")
+            else:
                 if process.poll() is not None:
                     raise QAFailure("dashboard exited during identity verification")
-                return payload
+                if _has_owned_listener(listener_owned) and condition(payload):
+                    return payload
         remaining = deadline - monotonic()
         if remaining > 0:
             sleep(min(DASHBOARD_POLL_INTERVAL, remaining))
@@ -305,6 +409,20 @@ def _require_alive(owned: OwnedProcess) -> None:
         raise QAFailure("owned dashboard exited during verification")
 
 
+def _fetch_owned_json(
+    fetch_json: Callable[[str, float], Any], url: str, timeout: float,
+    owned: OwnedProcess, port: int, listener_owned: Callable[[OwnedProcess, int], bool],
+) -> Any:
+    _require_alive(owned)
+    if not _has_owned_listener(lambda: listener_owned(owned, port)):
+        raise QAFailure("dashboard listener ownership could not be proven")
+    payload = fetch_json(url, timeout)
+    _require_alive(owned)
+    if not _has_owned_listener(lambda: listener_owned(owned, port)):
+        raise QAFailure("dashboard listener ownership changed during verification")
+    return payload
+
+
 def run_clean_install(
     repository: str, ref: str, *, hermes: str = "hermes", browser: str | None = None,
     environ: Mapping[str, str] | None = None,
@@ -314,6 +432,7 @@ def run_clean_install(
     sleep: Callable[[float], None] = time.sleep, port_picker: Callable[[], int] = _free_port,
     monotonic: Callable[[], float] = time.monotonic, which: Callable[..., str | None] = shutil.which,
     killpg: Callable[[int, int], None] = os.killpg, timeout: float = TOTAL_TIMEOUT,
+    listener_owned: Callable[[OwnedProcess, int], bool] = _listener_is_owned,
 ) -> dict[str, Any]:
     repository = github_repo(repository)
     ref = commit_sha(ref)
@@ -368,7 +487,8 @@ def run_clean_install(
                 try:
                     ready_deadline = min(operation_deadline, monotonic() + DASHBOARD_READY_TIMEOUT)
                     _wait_json(active_fetch, base_url + "/api/dashboard/plugins", dashboard.process, sleep,
-                               _dashboard_plugin_present, deadline=ready_deadline, monotonic=monotonic)
+                               _dashboard_plugin_present, deadline=ready_deadline, monotonic=monotonic,
+                               listener_owned=lambda owned=dashboard, selected=port: listener_owned(owned, selected))
                     _require_alive(dashboard)
                     break
                 except QAFailure as exc:
@@ -382,12 +502,19 @@ def run_clean_install(
                 raise QAFailure("dashboard failed to claim an owned loopback port") from last_start_error
 
             assert dashboard is not None and active_fetch is not None
-            health = active_fetch(base_url + f"/api/plugins/{PLUGIN_ID}/health", min(5.0, _remaining(operation_deadline, monotonic)))
-            _require_alive(dashboard)
+            health = _fetch_owned_json(
+                active_fetch, base_url + f"/api/plugins/{PLUGIN_ID}/health",
+                min(5.0, _remaining(operation_deadline, monotonic)), dashboard, port, listener_owned,
+            )
             _assert_health(health)
-            snapshot = active_fetch(base_url + f"/api/plugins/{PLUGIN_ID}/snapshot", min(5.0, _remaining(operation_deadline, monotonic)))
-            _require_alive(dashboard)
+            snapshot = _fetch_owned_json(
+                active_fetch, base_url + f"/api/plugins/{PLUGIN_ID}/snapshot",
+                min(5.0, _remaining(operation_deadline, monotonic)), dashboard, port, listener_owned,
+            )
             _assert_snapshot(snapshot)
+
+            if not _has_owned_listener(lambda: listener_owned(dashboard, port)):
+                raise QAFailure("dashboard listener ownership could not be proven before CDP QA")
 
             cdp = _spawn_owned(
                 popen,
@@ -404,6 +531,9 @@ def run_clean_install(
                 raise QAFailure("CDP QA exceeded the clean-install deadline") from exc
             if returncode != 0:
                 raise QAFailure("CDP QA failed")
+            _require_alive(dashboard)
+            if not _has_owned_listener(lambda: listener_owned(dashboard, port)):
+                raise QAFailure("dashboard listener ownership changed during CDP QA")
             cdp = None
         except (KeyboardInterrupt, SystemExit) as exc:
             cancellation = exc

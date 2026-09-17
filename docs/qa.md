@@ -28,7 +28,7 @@ After the candidate commit is available from GitHub at an immutable lowercase SH
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa_clean_install.py owner/repo --ref <40-character-lowercase-sha>
 ```
 
-The harness creates disposable `HOME` and `HERMES_HOME` directories outside the repository, removes OSB discovery and dashboard authentication/session variables from child environments, installs and validates the plugin, starts only its owned loopback Dashboard child, checks the no-OSB fail-closed API state, runs fixture CDP QA, then disables/removes the plugin and confirms absence. It terminates only the process it started and deletes all temporary state on success or failure. Do not run this command for an unpublished branch: installation intentionally resolves the exact GitHub ref and is not a working-tree test.
+The harness creates disposable `HOME` and `HERMES_HOME` directories outside the repository, removes OSB discovery and dashboard authentication/session variables from child environments, installs and validates the plugin, starts only its owned loopback Dashboard child, checks the no-OSB fail-closed API state, runs fixture CDP QA, then disables/removes the plugin and confirms absence. Before every harness HTTP acceptance, it proves on Linux through `/proc` metadata that the selected loopback listener belongs to the newly created Dashboard process group/session; unavailable or inconsistent ownership evidence fails closed. This real clean-install listener gate is therefore Linux-only. It terminates only the process it started and deletes all temporary state on success or failure. Do not run this command for an unpublished branch: installation intentionally resolves the exact GitHub ref and is not a working-tree test.
 
 ## Manual CDP matrix
 
