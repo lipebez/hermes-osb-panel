@@ -744,9 +744,12 @@ def run_clean_install(
                         if interrupted:
                             cleanup_errors.append(label + " interrupted")
                         return
-                    except (KeyboardInterrupt, SystemExit) as exc:
+                    except BaseException as exc:
                         if first_error is None:
                             first_error = exc
+                        if isinstance(exc, Exception):
+                            cleanup_errors.append(label)
+                            return
                         try:
                             expired = monotonic() >= cleanup_deadline
                         except BaseException as clock_exc:
@@ -757,11 +760,6 @@ def run_clean_install(
                             cleanup_errors.append(label)
                             return
                         interrupted = True
-                    except BaseException as exc:
-                        if first_error is None:
-                            first_error = exc
-                        cleanup_errors.append(label)
-                        return
 
             for label, owned in (("owned CDP process", cdp), ("owned dashboard process", dashboard)):
                 cleanup_step(
@@ -788,10 +786,10 @@ def run_clean_install(
 
                 cleanup_step("plugin absence confirmation", confirm_absent)
 
-        if isinstance(first_error, (KeyboardInterrupt, SystemExit)):
-            raise first_error
         if first_error is not None:
             if isinstance(first_error, QAFailure):
+                raise first_error
+            if not isinstance(first_error, Exception):
                 raise first_error
             raise QAFailure("clean-install QA failed") from first_error
         if cleanup_errors:

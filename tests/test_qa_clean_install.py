@@ -686,10 +686,14 @@ class HardeningRegressionTests(unittest.TestCase):
                 self.assertFalse(harness.installed)
 
     def test_cleanup_survives_interrupt_on_first_finally_clock_read(self):
+        class Cancel(BaseException):
+            pass
+
         harness = Harness()
         original_popen = harness.popen
         armed = False
         interrupted = False
+        cancellation = Cancel()
 
         def popen(command, **kwargs):
             process = original_popen(command, **kwargs)
@@ -708,17 +712,58 @@ class HardeningRegressionTests(unittest.TestCase):
             nonlocal interrupted
             if armed and not interrupted:
                 interrupted = True
-                raise KeyboardInterrupt()
+                raise cancellation
             return original_monotonic()
 
         harness.popen = popen
         harness.clock.monotonic = monotonic
-        with self.assertRaises(KeyboardInterrupt):
+        with self.assertRaises(Cancel) as raised:
             harness.execute()
+        self.assertIs(raised.exception, cancellation)
         actions = [" ".join(call) for call in harness.calls]
         self.assertTrue(any("plugins disable" in action for action in actions))
         self.assertTrue(any("plugins remove" in action for action in actions))
         self.assertGreaterEqual(sum("plugins list --json" in action for action in actions), 2)
+        self.assertTrue(harness.process.terminated)
+        self.assertFalse(harness.installed)
+
+    def test_cleanup_resumes_remove_after_base_exception_and_preserves_identity(self):
+        class Cancel(BaseException):
+            pass
+
+        harness = Harness()
+        original_run = harness.run
+        cancellation = Cancel()
+        fired = False
+        list_calls = 0
+        remove_completed = False
+        confirmation_list_calls = 0
+
+        def run(command, **kwargs):
+            nonlocal fired, list_calls, remove_completed, confirmation_list_calls
+            action = command[2] if len(command) > 2 and command[1] == "plugins" else ""
+            if action == "list":
+                list_calls += 1
+                if remove_completed:
+                    confirmation_list_calls += 1
+            if action == "remove" and not fired:
+                fired = True
+                raise cancellation
+            result = original_run(command, **kwargs)
+            if action == "remove":
+                remove_completed = True
+            return result
+
+        harness.run = run
+        with self.assertRaises(Cancel) as raised:
+            harness.execute()
+        self.assertIs(raised.exception, cancellation)
+        actions = [" ".join(call) for call in harness.calls]
+        self.assertTrue(any("plugins disable" in action for action in actions))
+        self.assertGreaterEqual(sum("plugins remove" in action for action in actions), 1)
+        self.assertGreaterEqual(list_calls, 2)
+        self.assertEqual(confirmation_list_calls, 1)
+        self.assertTrue(harness.process.terminated)
         self.assertFalse(harness.installed)
 
     def test_cdp_is_owned_and_cleaned_after_timeout(self):
