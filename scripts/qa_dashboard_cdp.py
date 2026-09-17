@@ -34,6 +34,29 @@ ROOT = Path(__file__).resolve().parents[1]
 F_ADD_SEALS = getattr(fcntl, "F_ADD_SEALS", 1033)
 F_GET_SEALS = getattr(fcntl, "F_GET_SEALS", 1034)
 REQUIRED_MEMFD_SEALS = 0x01 | 0x02 | 0x04 | 0x08
+BROWSER_INTERNAL_PREFIX = "/__qa_browser_internal/"
+BROWSER_INTERNAL_ENDPOINTS = (
+    ("google-base-url", "/"),
+    ("gaia-url", "/"),
+    ("lso-url", "/"),
+    ("google-apis-url", "/"),
+    ("oauth-account-manager-url", "/"),
+    ("gcm-checkin-url", BROWSER_INTERNAL_PREFIX + "gcm-checkin"),
+    ("gcm-mcs-endpoint", BROWSER_INTERNAL_PREFIX + "gcm-mcs"),
+)
+BROWSER_INTERNAL_RESERVED_PATHS = frozenset(
+    path for _, path in BROWSER_INTERNAL_ENDPOINTS if path.startswith(BROWSER_INTERNAL_PREFIX)
+)
+CHROMIUM_DISABLED_FEATURES = (
+    "AutofillServerCommunication",
+    "CertificateTransparencyComponentUpdater",
+    "OptimizationHints",
+    "MediaRouter",
+    "NetworkTimeServiceQuerying",
+    "SearchEnginePreconnector",
+    "DefaultSearchEnginePrewarm",
+    "PreconnectToSearch",
+)
 
 try:
     from dashboard.snapshot_contract import sanitize_report_payload
@@ -205,6 +228,11 @@ def demo_server(
             path = self.path.split("?", 1)[0]
             if request_log is not None:
                 request_log.append(path)
+            if path in BROWSER_INTERNAL_RESERVED_PATHS:
+                self.send_response(204)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             if path == "/__qa_redirect" and redirect_target is not None:
                 self.send_response(302)
                 self.send_header("Location", redirect_target)
@@ -229,6 +257,17 @@ def demo_server(
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+        def do_POST(self) -> None:  # noqa: N802 - stdlib handler contract
+            path = self.path.split("?", 1)[0]
+            if request_log is not None:
+                request_log.append(path)
+            if path not in BROWSER_INTERNAL_RESERVED_PATHS:
+                self.send_error(404)
+                return
+            self.send_response(204)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
 
         def log_message(self, format: str, *args: Any) -> None:
             del format, args
@@ -1224,13 +1263,22 @@ def run_viewport(cdp: CDP, url: str, out: Path, width: int, height: int, browser
     return {"viewport": {"width": width, "height": height}, "metrics": metrics, "probes": probes, "checks": checks, "console_errors": errors, "network": cdp.egress_boundary.records[boundary_record_start:], "browser_network": global_network, "screenshot": str(screenshot)}
 
 
-def chromium_command(chromium: str, port: int, profile: str, page_url: str, proxy_port: int) -> list[str]:
+def chromium_command(
+    chromium: str,
+    port: int,
+    profile: str,
+    page_url: str,
+    proxy_port: int,
+    *,
+    redirect_browser_internals: bool = False,
+) -> list[str]:
     """Build fixed Chromium argv; --no-sandbox is not an OS sandbox claim."""
 
-    hostname = urlsplit(page_url).hostname
+    parsed = urlsplit(page_url)
+    hostname = parsed.hostname
     if hostname not in {"127.0.0.1", "localhost", "::1"}:
         raise RuntimeError("unsafe Chromium resolver exception")
-    return [
+    command = [
         chromium,
         "--headless=new",
         "--no-sandbox",
@@ -1247,7 +1295,7 @@ def chromium_command(chromium: str, port: int, profile: str, page_url: str, prox
         "--metrics-recording-only",
         "--no-first-run",
         "--safebrowsing-disable-auto-update",
-        "--disable-features=AutofillServerCommunication,CertificateTransparencyComponentUpdater,OptimizationHints,MediaRouter",
+        "--disable-features=" + ",".join(CHROMIUM_DISABLED_FEATURES),
         "--disable-quic",
         "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
         f"--proxy-server=http://127.0.0.1:{proxy_port}",
@@ -1258,6 +1306,10 @@ def chromium_command(chromium: str, port: int, profile: str, page_url: str, prox
         f"--user-data-dir={profile}",
         "about:blank",
     ]
+    if redirect_browser_internals:
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        command[-1:-1] = [f"--{switch}={origin}{path}" for switch, path in BROWSER_INTERNAL_ENDPOINTS]
+    return command
 
 
 def chromium_environment() -> dict[str, str]:
@@ -1326,7 +1378,14 @@ def main(argv: list[str] | None = None) -> int:
         if not isinstance(runner_pgid, int) or runner_pgid <= 0:
             raise RuntimeError("CDP runner process group identity was unavailable")
         process = subprocess.Popen(
-            chromium_command(chromium, port, profile, run_url, proxy_port),
+            chromium_command(
+                chromium,
+                port,
+                profile,
+                run_url,
+                proxy_port,
+                redirect_browser_internals=bool(args.fixture),
+            ),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             env=chromium_environment(),

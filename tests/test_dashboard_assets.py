@@ -13,6 +13,7 @@ import threading
 import time
 import tomllib
 import unittest
+import urllib.error
 import urllib.request
 from contextlib import contextmanager
 from socketserver import BaseRequestHandler, ThreadingTCPServer
@@ -74,6 +75,7 @@ class DashboardAssetTests(unittest.TestCase):
         fixture_url = "http:" + "//" + "127.0.0.1:8123/second-brain"
         command = qa_dashboard_cdp.chromium_command(
             "/usr/bin/chromium", 9222, "/tmp/profile", fixture_url, 8118,
+            redirect_browser_internals=True,
         )
         self.assertIn("--proxy-server=" + "http:" + "//" + "127.0.0.1:8118", command)
         self.assertIn("--proxy-bypass-list=<-loopback>", command)
@@ -81,6 +83,64 @@ class DashboardAssetTests(unittest.TestCase):
         self.assertIn("--force-webrtc-ip-handling-policy=disable_non_proxied_udp", command)
         self.assertIn("--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1", command)
         self.assertNotIn("--no-proxy-server", command)
+
+        disabled = next(item for item in command if item.startswith("--disable-features="))
+        disabled_features = set(disabled.split("=", 1)[1].split(","))
+        self.assertTrue({
+            "NetworkTimeServiceQuerying",
+            "SearchEnginePreconnector",
+            "DefaultSearchEnginePrewarm",
+            "PreconnectToSearch",
+        }.issubset(disabled_features))
+        origin = fixture_url.rsplit("/", 1)[0]
+        for switch, path in qa_dashboard_cdp.BROWSER_INTERNAL_ENDPOINTS:
+            self.assertIn(f"--{switch}={origin}{path}", command)
+        self.assertEqual(
+            qa_dashboard_cdp.BROWSER_INTERNAL_RESERVED_PATHS,
+            {
+                qa_dashboard_cdp.BROWSER_INTERNAL_PREFIX + "gcm-checkin",
+                qa_dashboard_cdp.BROWSER_INTERNAL_PREFIX + "gcm-mcs",
+            },
+        )
+        self.assertTrue(qa_dashboard_cdp.BROWSER_INTERNAL_RESERVED_PATHS.isdisjoint({
+            "/", "/second-brain", "/assets/index.js", "/assets/style.css",
+            "/api/plugins/hermes-osb-panel/snapshot",
+        }))
+
+        live_command = qa_dashboard_cdp.chromium_command(
+            "/usr/bin/chromium", 9222, "/tmp/profile", fixture_url, 8118,
+            redirect_browser_internals=False,
+        )
+        self.assertFalse(any(any(item.startswith(f"--{switch}=") for switch, _ in qa_dashboard_cdp.BROWSER_INTERNAL_ENDPOINTS) for item in live_command))
+
+    def test_fixture_server_reserves_browser_internal_paths_without_asset_or_api_overlap(self):
+        fixture = ROOT / "tests" / "fixtures" / "demo_snapshot_v1.json"
+        request_log: list[str] = []
+        with qa_dashboard_cdp.demo_server(fixture, b"js", b"css", request_log=request_log) as url:
+            origin = url.rsplit("/", 1)[0]
+            for path in sorted(qa_dashboard_cdp.BROWSER_INTERNAL_RESERVED_PATHS):
+                request = urllib.request.Request(origin + path, method="GET")
+                with urllib.request.urlopen(request) as response:
+                    self.assertEqual(response.status, 204)
+                    self.assertEqual(response.read(), b"")
+            with self.assertRaises(urllib.error.HTTPError) as unknown:
+                urllib.request.urlopen(origin + qa_dashboard_cdp.BROWSER_INTERNAL_PREFIX + "unknown")
+            self.assertEqual(unknown.exception.code, 404)
+            request = urllib.request.Request(
+                origin + "/api/plugins/hermes-osb-panel/snapshot", data=b"", method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as api_post:
+                urllib.request.urlopen(request)
+            self.assertEqual(api_post.exception.code, 404)
+
+        self.assertEqual(
+            request_log[:-2],
+            sorted(qa_dashboard_cdp.BROWSER_INTERNAL_RESERVED_PATHS),
+        )
+        self.assertEqual(request_log[-2:], [
+            qa_dashboard_cdp.BROWSER_INTERNAL_PREFIX + "unknown",
+            "/api/plugins/hermes-osb-panel/snapshot",
+        ])
 
     def test_cleanup_preserves_first_baseexception_and_stops_process_and_servers(self):
         class DisableFailure(BaseException):
@@ -219,6 +279,73 @@ class DashboardAssetTests(unittest.TestCase):
         ):
             with self.subTest(url=url):
                 self.assertFalse(boundary.allows(url))
+
+    @unittest.skipUnless(
+        hasattr(os, "memfd_create")
+        and shutil.which("chromium")
+        and importlib.util.find_spec("websocket") is not None,
+        "Linux Chromium and websocket-client required",
+    )
+    def test_real_clean_chromium_fixture_has_no_browser_global_denials(self):
+        chromium = shutil.which("chromium")
+        assert chromium is not None
+        fixture = ROOT / "tests" / "fixtures" / "demo_snapshot_v1.json"
+        installed_js = (ROOT / "dashboard" / "dist" / "index.js").read_bytes()
+        installed_css = (ROOT / "dashboard" / "dist" / "style.css").read_bytes()
+        js_fd = qa_dashboard_cdp.create_sealed_memfd("clean-egress-js", installed_js)
+        css_fd = qa_dashboard_cdp.create_sealed_memfd("clean-egress-css", installed_css)
+        request_log: list[str] = []
+        proxy_records: list[dict[str, object]] = []
+        original_demo_server = qa_dashboard_cdp.demo_server
+        original_browser_proxy = qa_dashboard_cdp.browser_proxy
+
+        @contextmanager
+        def probing_server(path, javascript, stylesheet):
+            with original_demo_server(path, javascript, stylesheet, request_log=request_log) as url:
+                yield url
+
+        @contextmanager
+        def probing_proxy(url, require_fixture_origin=True):
+            with original_browser_proxy(url, require_fixture_origin=require_fixture_origin) as value:
+                boundary, _ = value
+                yield value
+                proxy_records.extend(boundary.snapshot())
+
+        def network_probe(cdp, url, output, width, height, browser_boundary):
+            cdp.call("Page.navigate", {"url": url})
+            qa_dashboard_cdp.wait_for(cdp, "document.readyState === 'complete'")
+            time.sleep(3)
+            cdp.drain()
+            blocked = browser_boundary.blocked()
+            return {
+                "viewport": {"width": width, "height": height}, "metrics": {}, "probes": {},
+                "checks": [{"name": "browser_global_egress_boundary", "passed": not blocked, "detail": blocked}],
+                "console_errors": [], "browser_network": browser_boundary.snapshot(), "screenshot": "",
+            }
+
+        with (
+            tempfile.TemporaryDirectory() as output,
+            patch.object(qa_dashboard_cdp, "demo_server", side_effect=probing_server),
+            patch.object(qa_dashboard_cdp, "browser_proxy", side_effect=probing_proxy),
+            patch.object(qa_dashboard_cdp, "run_viewport", side_effect=network_probe),
+        ):
+            result = qa_dashboard_cdp.main([
+                "--url", "http:" + "//" + "127.0.0.1:1/second-brain",
+                "--output", output,
+                "--fixture", str(fixture),
+                "--asset-js-fd", str(js_fd),
+                "--asset-css-fd", str(css_fd),
+                "--chromium", chromium,
+                "--viewport", "390x844",
+            ])
+            report = json.loads((Path(output) / "report.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(result, 0)
+        self.assertTrue(report["passed"])
+        self.assertEqual([item for item in proxy_records if not item["allowed"]], [])
+        internal_requests = [path for path in request_log if path.startswith(qa_dashboard_cdp.BROWSER_INTERNAL_PREFIX)]
+        self.assertTrue(internal_requests)
+        self.assertTrue(set(internal_requests).issubset(qa_dashboard_cdp.BROWSER_INTERNAL_RESERVED_PATHS))
 
     @unittest.skipUnless(
         hasattr(os, "memfd_create")
