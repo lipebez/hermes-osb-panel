@@ -6,6 +6,7 @@ import stat
 import subprocess
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
 from unittest import mock
 
@@ -14,6 +15,58 @@ from scripts import qa_clean_install as qa
 
 SHA = "a" * 40
 PLUGIN = "hermes-osb-panel"
+
+DISABLED_COUNTS = {
+    "preferences": 0,
+    "inbox": 0,
+    "retired": 0,
+    "logs": 0,
+    "brain_nodes": 0,
+    "vault_notes": 0,
+    "hermes_memory": 0,
+    "hermes_user": 0,
+    "hermes_notes": 0,
+}
+DISABLED_PROVIDER = {
+    "name": "open-second-brain",
+    "available": False,
+    "health": "unavailable",
+    "semantic": "disabled",
+    "mode": "disabled",
+}
+EMPTY_GRAPH_SUMMARY = {"hub_ids": [], "orphan_ids": [], "broken_count": 0}
+
+
+def disabled_health():
+    return {"ok": False, "provider": deepcopy(DISABLED_PROVIDER), "counts": deepcopy(DISABLED_COUNTS)}
+
+
+def disabled_snapshot():
+    return {
+        "schema": "open-second-brain.dashboard.snapshot.v1",
+        "generated_at": "2026-09-17T12:00:00+00:00",
+        "revision": "f5f601586348141c",
+        "provider": deepcopy(DISABLED_PROVIDER),
+        "nodes": [],
+        "edges": [],
+        "summaries": {"counts": deepcopy(DISABLED_COUNTS), "graph": deepcopy(EMPTY_GRAPH_SUMMARY)},
+        "limits": {
+            key: {"shown": 0, "total": 0, "truncated": False}
+            for key in ("brain_files", "vault_files", "artifacts", "vault_notes")
+        },
+        "activity": {"active_preview": "", "recent": [], "timeline": []},
+        "metrics": {},
+        "capabilities": {"graph_3d": True},
+        "counts": deepcopy(DISABLED_COUNTS),
+        "graph": {"nodes": [], "edges": []},
+        "graph_summary": deepcopy(EMPTY_GRAPH_SUMMARY),
+        "broken_links": [],
+        "active_preview": "",
+        "recent_logs": [],
+        "timeline_events": [],
+        "artifacts": [],
+        "vault_notes": [],
+    }
 
 
 def uses_dashboard_stop(command):
@@ -122,10 +175,10 @@ class Harness:
             ]
             key = "plugins"
         elif url.endswith("/health"):
-            value = {"ok": False, "provider": {"available": False, "mode": "disabled"}}
+            value = disabled_health()
             key = "health"
         else:
-            value = {"provider": {"available": False, "mode": "disabled"}, "graph": {"nodes": [], "edges": []}}
+            value = disabled_snapshot()
             key = "snapshot"
         mutation = self.mutate.get(key)
         if mutation:
@@ -172,6 +225,72 @@ class ValidationTests(unittest.TestCase):
         commands = [call for call in harness.calls if call[:1] != ("GET",)]
         self.assertFalse(any(uses_dashboard_stop(command) for command in commands))
         self.assertTrue(uses_dashboard_stop(("hermes", "dashboard", "--stop")))
+
+    def test_health_assertion_accepts_only_complete_disabled_contract(self):
+        qa._assert_health(disabled_health())
+        mutations = []
+        for key in disabled_health():
+            value = disabled_health()
+            value.pop(key)
+            mutations.append(value)
+        for path, replacement in (
+            (("ok",), True),
+            (("provider", "available"), True),
+            (("provider", "mode"), "fixture"),
+            (("provider", "semantic"), "unknown"),
+            (("provider", "health"), "ok"),
+            (("counts", "brain_nodes"), 1),
+            (("counts", "brain_nodes"), False),
+        ):
+            value = disabled_health()
+            target = value
+            for part in path[:-1]:
+                target = target[part]
+            target[path[-1]] = replacement
+            mutations.append(value)
+        unexpected = disabled_health()
+        unexpected["private"] = "PRIVATE_CANARY"
+        mutations.append(unexpected)
+        for value in mutations:
+            with self.subTest(payload=value), self.assertRaises(qa.QAFailure):
+                qa._assert_health(value)
+
+    def test_snapshot_assertion_rejects_content_on_every_public_surface(self):
+        qa._assert_snapshot(disabled_snapshot())
+        mutations = {
+            "schema": lambda p: p.__setitem__("schema", "PRIVATE_CANARY"),
+            "generated_at": lambda p: p.__setitem__("generated_at", "PRIVATE_CANARY"),
+            "provider": lambda p: p["provider"].__setitem__("private", "PRIVATE_CANARY"),
+            "nodes": lambda p: p["nodes"].append({"id": "PRIVATE_CANARY"}),
+            "edges": lambda p: p["edges"].append({"source": "PRIVATE_CANARY"}),
+            "graph_nodes": lambda p: p["graph"]["nodes"].append({"id": "PRIVATE_CANARY"}),
+            "graph_edges": lambda p: p["graph"]["edges"].append({"source": "PRIVATE_CANARY"}),
+            "active_preview": lambda p: p.__setitem__("active_preview", "PRIVATE_CANARY"),
+            "recent_logs": lambda p: p["recent_logs"].append({"text": "PRIVATE_CANARY"}),
+            "timeline_events": lambda p: p["timeline_events"].append({"text": "PRIVATE_CANARY"}),
+            "activity_preview": lambda p: p["activity"].__setitem__("active_preview", "PRIVATE_CANARY"),
+            "activity_recent": lambda p: p["activity"]["recent"].append({"text": "PRIVATE_CANARY"}),
+            "activity_timeline": lambda p: p["activity"]["timeline"].append({"text": "PRIVATE_CANARY"}),
+            "artifacts": lambda p: p["artifacts"].append({"id": "PRIVATE_CANARY"}),
+            "vault_notes": lambda p: p["vault_notes"].append({"id": "PRIVATE_CANARY"}),
+            "broken_links": lambda p: p["broken_links"].append({"target": "PRIVATE_CANARY"}),
+            "counts": lambda p: p["counts"].__setitem__("brain_nodes", 1),
+            "summary_counts": lambda p: p["summaries"]["counts"].__setitem__("brain_nodes", 1),
+            "summary_graph": lambda p: p["summaries"]["graph"]["hub_ids"].append("PRIVATE_CANARY"),
+            "graph_summary": lambda p: p["graph_summary"]["orphan_ids"].append("PRIVATE_CANARY"),
+            "limits": lambda p: p["limits"]["brain_files"].__setitem__("total", 1),
+            "metrics": lambda p: p["metrics"].__setitem__("private", "PRIVATE_CANARY"),
+            "capabilities": lambda p: p["capabilities"].__setitem__("private", "PRIVATE_CANARY"),
+            "revision": lambda p: p.__setitem__("revision", "PRIVATE_CANARY"),
+            "metadata": lambda p: p.__setitem__("metadata", {"private": "PRIVATE_CANARY"}),
+            "unexpected": lambda p: p.__setitem__("private", "PRIVATE_CANARY"),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                payload = disabled_snapshot()
+                mutate(payload)
+                with self.assertRaises(qa.QAFailure):
+                    qa._assert_snapshot(payload)
 
 
 class CleanInstallTests(unittest.TestCase):

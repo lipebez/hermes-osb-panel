@@ -17,6 +17,7 @@ import tempfile
 import time
 
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlsplit
@@ -38,6 +39,27 @@ SAFE_PATH = "/usr/bin:/bin"
 _REPO_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,99})/[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,99})\Z")
 _SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
 _SOCKET_INODE_RE = re.compile(r"socket:\[([1-9][0-9]*)\]\Z")
+
+_DISABLED_COUNTS = {
+    "preferences": 0,
+    "inbox": 0,
+    "retired": 0,
+    "logs": 0,
+    "brain_nodes": 0,
+    "vault_notes": 0,
+    "hermes_memory": 0,
+    "hermes_user": 0,
+    "hermes_notes": 0,
+}
+_DISABLED_PROVIDER = {
+    "name": "open-second-brain",
+    "available": False,
+    "health": "unavailable",
+    "semantic": "disabled",
+    "mode": "disabled",
+}
+_EMPTY_GRAPH_SUMMARY = {"hub_ids": [], "orphan_ids": [], "broken_count": 0}
+_EMPTY_GRAPH_REVISION = "f5f601586348141c"
 
 
 class QAFailure(RuntimeError):
@@ -558,23 +580,76 @@ def _stop_owned(
         except (subprocess.TimeoutExpired, ChildProcessError):
             pass
 
+def _strict_contract_equal(actual: Any, expected: Any) -> bool:
+    """Compare JSON values without treating booleans as integer counts."""
+    if type(actual) is not type(expected):
+        return False
+    if isinstance(expected, dict):
+        return actual.keys() == expected.keys() and all(
+            _strict_contract_equal(actual[key], value) for key, value in expected.items()
+        )
+    if isinstance(expected, list):
+        return len(actual) == len(expected) and all(
+            _strict_contract_equal(left, right) for left, right in zip(actual, expected)
+        )
+    return actual == expected
+
+
+def _disabled_snapshot_contract() -> dict[str, Any]:
+    return {
+        "schema": "open-second-brain.dashboard.snapshot.v1",
+        "revision": _EMPTY_GRAPH_REVISION,
+        "provider": dict(_DISABLED_PROVIDER),
+        "nodes": [],
+        "edges": [],
+        "summaries": {
+            "counts": dict(_DISABLED_COUNTS),
+            "graph": {key: list(value) if isinstance(value, list) else value for key, value in _EMPTY_GRAPH_SUMMARY.items()},
+        },
+        "limits": {
+            key: {"shown": 0, "total": 0, "truncated": False}
+            for key in ("brain_files", "vault_files", "artifacts", "vault_notes")
+        },
+        "activity": {"active_preview": "", "recent": [], "timeline": []},
+        "metrics": {},
+        "capabilities": {"graph_3d": True},
+        "counts": dict(_DISABLED_COUNTS),
+        "graph": {"nodes": [], "edges": []},
+        "graph_summary": {
+            key: list(value) if isinstance(value, list) else value for key, value in _EMPTY_GRAPH_SUMMARY.items()
+        },
+        "broken_links": [],
+        "active_preview": "",
+        "recent_logs": [],
+        "timeline_events": [],
+        "artifacts": [],
+        "vault_notes": [],
+    }
+
+
 def _assert_snapshot(payload: Any) -> None:
-    if not isinstance(payload, dict):
+    if not isinstance(payload, dict) or set(payload) != {"generated_at", *_disabled_snapshot_contract()}:
         raise QAFailure("snapshot contract failed")
-    provider = payload.get("provider")
-    graph = payload.get("graph")
-    if not isinstance(provider, dict) or provider.get("available") is not False or provider.get("mode") != "disabled":
-        raise QAFailure("snapshot provider did not fail closed")
-    if not isinstance(graph, dict) or graph.get("nodes") != [] or graph.get("edges") != []:
-        raise QAFailure("snapshot graph did not fail closed")
+    generated_at = payload.get("generated_at")
+    try:
+        parsed = datetime.fromisoformat(generated_at) if type(generated_at) is str else None
+    except ValueError as exc:
+        raise QAFailure("snapshot contract failed") from exc
+    if parsed is None or parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise QAFailure("snapshot contract failed")
+    stable_payload = {key: value for key, value in payload.items() if key != "generated_at"}
+    if not _strict_contract_equal(stable_payload, _disabled_snapshot_contract()):
+        raise QAFailure("snapshot did not fail closed")
 
 
 def _assert_health(payload: Any) -> None:
-    if not isinstance(payload, dict):
+    expected = {
+        "ok": False,
+        "provider": dict(_DISABLED_PROVIDER),
+        "counts": dict(_DISABLED_COUNTS),
+    }
+    if not isinstance(payload, dict) or not _strict_contract_equal(payload, expected):
         raise QAFailure("plugin health contract failed")
-    provider = payload.get("provider")
-    if not isinstance(provider, dict) or provider.get("available") is not False or provider.get("mode") != "disabled":
-        raise QAFailure("health provider did not fail closed")
 
 
 def _require_alive(owned: OwnedProcess) -> None:
