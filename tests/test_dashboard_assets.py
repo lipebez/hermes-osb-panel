@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import tomllib
 import unittest
 import urllib.request
+from contextlib import contextmanager
+from socketserver import BaseRequestHandler, ThreadingTCPServer
 from pathlib import Path
 from unittest.mock import patch
 
@@ -20,6 +25,105 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class DashboardAssetTests(unittest.TestCase):
+    def test_cdp_egress_boundary_allows_only_exact_fixture_origin(self):
+        ipv4 = "127.0.0.1"
+        local_name = "localhost"
+        ipv6 = "::1"
+        boundary = qa_dashboard_cdp.EgressBoundary(f"http://{ipv4}:8123/second-brain")
+
+        self.assertTrue(boundary.allows(f"http://{ipv4}:8123/assets/index.js"))
+        self.assertTrue(boundary.allows("data:text/plain,fixture"))
+        self.assertTrue(boundary.allows(f"blob:http://{ipv4}:8123/id"))
+        for url in (
+            f"http://{ipv4}:8124/",
+            f"http://{local_name}:8123/",
+            f"http://[{ipv6}]:8123/",
+            f"https://{ipv4}:8123/",
+            f"ws://{ipv4}:8123/",
+            f"wss://{ipv4}:8123/",
+            "file:///etc/passwd",
+            "chrome-extension://fixture/page.html",
+            "http://example.invalid/",
+        ):
+            with self.subTest(url=url):
+                self.assertFalse(boundary.allows(url))
+
+    @unittest.skipUnless(
+        hasattr(os, "memfd_create")
+        and shutil.which("chromium")
+        and importlib.util.find_spec("websocket") is not None,
+        "Linux Chromium and websocket-client required",
+    )
+    def test_real_chromium_blocks_and_fails_all_fixture_egress_attempts(self):
+        class CanaryHandler(BaseRequestHandler):
+            def handle(inner_self):
+                canary_hits.append(inner_self.request.recv(80))
+
+        canary_hits: list[bytes] = []
+        canary = ThreadingTCPServer(("127.0.0.1", 0), CanaryHandler)
+        canary_thread = threading.Thread(target=canary.serve_forever, daemon=True)
+        canary_thread.start()
+        port = canary.server_address[1]
+        attacks = f"""
+window.addEventListener('load', () => setTimeout(() => {{
+  for (const url of [
+    'http://example.invalid/internet',
+    'http://127.0.0.1:{port}/other-port',
+    'http://localhost:{port}/localhost-alias',
+    'http://[::1]:{port}/ipv6-alias',
+    'https://127.0.0.1:{port}/https-scheme',
+    '/__qa_redirect'
+  ]) fetch(url).catch(() => {{}});
+  for (const url of ['ws://127.0.0.1:{port}/ws', 'wss://127.0.0.1:{port}/wss']) {{
+    try {{ const socket = new WebSocket(url); socket.onerror = () => {{}}; }} catch (_) {{}}
+  }}
+}}, 400));
+""".encode()
+        installed_js = (ROOT / "dashboard" / "dist" / "index.js").read_bytes() + attacks
+        installed_css = (ROOT / "dashboard" / "dist" / "style.css").read_bytes()
+        fixture = ROOT / "tests" / "fixtures" / "demo_snapshot_v1.json"
+        request_log: list[str] = []
+        original_demo_server = qa_dashboard_cdp.demo_server
+
+        @contextmanager
+        def probing_server(path, javascript, stylesheet):
+            with original_demo_server(
+                path,
+                javascript,
+                stylesheet,
+                redirect_target=f"http://127.0.0.1:{port}/redirect-target",
+                request_log=request_log,
+            ) as url:
+                yield url
+
+        js_fd = qa_dashboard_cdp.create_sealed_memfd("egress-js", installed_js)
+        css_fd = qa_dashboard_cdp.create_sealed_memfd("egress-css", installed_css)
+        try:
+            with tempfile.TemporaryDirectory() as output, patch.object(
+                qa_dashboard_cdp, "demo_server", side_effect=probing_server
+            ):
+                result = qa_dashboard_cdp.main([
+                    "--url", f"http://{'127.0.0.1'}:1/second-brain",
+                    "--output", output,
+                    "--fixture", str(fixture),
+                    "--asset-js-fd", str(js_fd),
+                    "--asset-css-fd", str(css_fd),
+                    "--chromium", shutil.which("chromium"),
+                    "--viewport", "390x844",
+                ])
+                report = json.loads((Path(output) / "report.json").read_text(encoding="utf-8"))
+        finally:
+            canary.shutdown()
+            canary.server_close()
+            canary_thread.join(timeout=3)
+
+        self.assertEqual(result, 1)
+        self.assertIn("390x844:egress_boundary", report["failures"])
+        self.assertEqual(canary_hits, [])
+        self.assertIn("/assets/index.js", request_log)
+        self.assertIn("/api/plugins/hermes-osb-panel/snapshot", request_log)
+        self.assertIn("/__qa_redirect", request_log)
+
     def test_fixture_server_serves_only_explicit_installed_asset_bytes(self):
         fixture = ROOT / "tests" / "fixtures" / "demo_snapshot_v1.json"
         checkout_js = (ROOT / "dashboard" / "dist" / "index.js").read_bytes()
@@ -457,6 +561,10 @@ class DashboardAssetTests(unittest.TestCase):
                 self.url = url
             def call(self, method, params=None):
                 return {}
+            def enable_egress_boundary(self, url, require_fixture_origin=True):
+                self.boundary = (url, require_fixture_origin)
+            def disable_egress_boundary(self):
+                self.disabled = True
             def close(self):
                 pass
 

@@ -185,7 +185,14 @@ def stop_inherited_process(process: Any, timeout: float = 6.0) -> None:
 
 
 @contextmanager
-def demo_server(fixture: Path, javascript: bytes, stylesheet: bytes):
+def demo_server(
+    fixture: Path,
+    javascript: bytes,
+    stylesheet: bytes,
+    *,
+    redirect_target: str | None = None,
+    request_log: list[str] | None = None,
+):
     """Serve already-validated immutable asset bytes and one synthetic fixture."""
 
     payload = fixture.read_bytes()
@@ -194,6 +201,14 @@ def demo_server(fixture: Path, javascript: bytes, stylesheet: bytes):
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 - stdlib handler contract
             path = self.path.split("?", 1)[0]
+            if request_log is not None:
+                request_log.append(path)
+            if path == "/__qa_redirect" and redirect_target is not None:
+                self.send_response(302)
+                self.send_header("Location", redirect_target)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             if path == "/api/plugins/hermes-osb-panel/snapshot":
                 body, content_type = payload, "application/json"
             elif path == "/assets/index.js":
@@ -282,29 +297,151 @@ def session_fetch_wrapper_source(session_token: str) -> str:
     })();""" % token_literal
 
 
+class EgressBoundary:
+    """Exact-origin browser network policy; data/blob are non-egress only."""
+
+    NON_EGRESS_SCHEMES = frozenset({"data", "blob"})
+
+    def __init__(self, page_url: str, *, require_fixture_origin: bool = True):
+        parsed = urlsplit(page_url)
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise RuntimeError("invalid egress allowlist origin") from exc
+        if parsed.username is not None or parsed.password is not None or port is None:
+            raise RuntimeError("egress allowlist requires an explicit origin without userinfo")
+        if require_fixture_origin and (parsed.scheme != "http" or parsed.hostname != "127.0.0.1"):
+            raise RuntimeError("fixture egress allowlist must be an http://127.0.0.1 origin")
+        if parsed.scheme not in {"http", "https"} or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+            raise RuntimeError("egress allowlist must be a loopback HTTP origin")
+        self.scheme = parsed.scheme
+        self.hostname = parsed.hostname
+        self.port = port
+        self.expected_url = page_url
+        self.records: list[dict[str, Any]] = []
+
+    def allows(self, url: str) -> bool:
+        try:
+            parsed = urlsplit(url)
+            port = parsed.port
+        except (TypeError, ValueError):
+            return False
+        if parsed.scheme in self.NON_EGRESS_SCHEMES:
+            return True
+        return bool(
+            parsed.scheme == self.scheme
+            and parsed.hostname == self.hostname
+            and port == self.port
+            and parsed.username is None
+            and parsed.password is None
+        )
+
+    def record(self, kind: str, url: str, **detail: Any) -> bool:
+        allowed = self.allows(url)
+        self.records.append({"kind": kind, "url": url, "allowed": allowed, **detail})
+        return allowed
+
+    def blocked_since(self, start: int = 0) -> list[dict[str, Any]]:
+        return [item for item in self.records[start:] if not item["allowed"]]
+
+
 class CDP:
     def __init__(self, ws_url: str):
         import websocket
 
-        self.websocket = websocket
         self.ws = websocket.create_connection(ws_url, timeout=12, origin="http://localhost")
+        self.websocket_timeout = websocket.WebSocketTimeoutException
         self.next_id = 0
         self.events: list[dict[str, Any]] = []
+        self.responses: dict[int, dict[str, Any]] = {}
+        self.egress_boundary: EgressBoundary | None = None
 
     def close(self) -> None:
         self.ws.close()
+
+    def _receive_one(self) -> None:
+        payload = json.loads(self.ws.recv())
+        response_id = payload.get("id")
+        if isinstance(response_id, int):
+            self.responses[response_id] = payload
+            return
+        self.events.append(payload)
+        self._handle_event(payload)
+
+    def _handle_event(self, payload: dict[str, Any]) -> None:
+        boundary = self.egress_boundary
+        if boundary is None:
+            return
+        method = payload.get("method")
+        params = payload.get("params") or {}
+        if method == "Fetch.requestPaused":
+            request_id = params.get("requestId")
+            request = params.get("request") or {}
+            url = str(request.get("url") or "")
+            allowed = boundary.record(
+                "request",
+                url,
+                resource_type=str(params.get("resourceType") or "unknown"),
+                redirected=bool(params.get("redirectedRequestId")),
+            )
+            command = "Fetch.continueRequest" if allowed else "Fetch.failRequest"
+            arguments = {"requestId": request_id}
+            if not allowed:
+                arguments["errorReason"] = "BlockedByClient"
+            self.call(command, arguments)
+        elif method == "Network.requestWillBeSent":
+            request = params.get("request") or {}
+            redirect = params.get("redirectResponse") or {}
+            if redirect:
+                boundary.record(
+                    "redirect",
+                    str(redirect.get("url") or ""),
+                    status=int(redirect.get("status") or 0),
+                    target=str(request.get("url") or ""),
+                )
+            boundary.record("observed", str(request.get("url") or ""))
+        elif method == "Network.webSocketCreated":
+            boundary.record("websocket", str(params.get("url") or ""))
+        elif method == "Runtime.bindingCalled" and params.get("name") == "__hermesEgressViolation":
+            boundary.record("blocked-api", str(params.get("payload") or ""))
+
+    def enable_egress_boundary(self, page_url: str, *, require_fixture_origin: bool = True) -> None:
+        if self.egress_boundary is not None:
+            raise RuntimeError("CDP egress boundary was already enabled")
+        self.egress_boundary = EgressBoundary(page_url, require_fixture_origin=require_fixture_origin)
+        self.call("Network.setBlockedURLs", {"urls": ["ws://*/*", "wss://*/*", "file://*", "chrome-extension://*"]})
+        self.call("Fetch.enable", {"patterns": [{"urlPattern": "*", "requestStage": "Request"}]})
+        self.call("Runtime.addBinding", {"name": "__hermesEgressViolation"})
+        self.call(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {"source": """(() => {
+              const deny = (name) => function(url) {
+                const target = String(url === undefined ? name : url);
+                __hermesEgressViolation(target);
+                throw new DOMException(name + ' is disabled by QA egress policy', 'SecurityError');
+              };
+              for (const name of ['WebSocket', 'EventSource', 'Worker', 'SharedWorker']) {
+                if (name in globalThis) Object.defineProperty(globalThis, name, {
+                  value: deny(name), configurable: false, writable: false
+                });
+              }
+            })();"""},
+        )
+
+    def disable_egress_boundary(self) -> None:
+        if self.egress_boundary is not None:
+            self.call("Fetch.disable")
 
     def call(self, method: str, params: dict[str, Any] | None = None) -> Any:
         self.next_id += 1
         msg_id = self.next_id
         self.ws.send(json.dumps({"id": msg_id, "method": method, "params": params or {}}))
-        while True:
-            payload = json.loads(self.ws.recv())
-            if payload.get("id") == msg_id:
-                if "error" in payload:
-                    raise RuntimeError(f"CDP {method}: {payload['error']}")
-                return payload.get("result", {})
-            self.events.append(payload)
+        while msg_id not in self.responses:
+            self._receive_one()
+        payload = self.responses.pop(msg_id)
+        if "error" in payload:
+            raise RuntimeError(f"CDP {method}: {payload['error']}")
+        return payload.get("result", {})
 
     def evaluate(self, expression: str, await_promise: bool = False) -> Any:
         result = self.call(
@@ -328,8 +465,8 @@ class CDP:
         try:
             while time.time() < deadline:
                 try:
-                    self.events.append(json.loads(self.ws.recv()))
-                except self.websocket.WebSocketTimeoutException:
+                    self._receive_one()
+                except self.websocket_timeout:
                     pass
         finally:
             self.ws.settimeout(old_timeout)
@@ -876,6 +1013,9 @@ def invariant_checks(metrics: dict[str, Any], probes: dict[str, Any], width: int
 
 
 def run_viewport(cdp: CDP, url: str, out: Path, width: int, height: int) -> dict[str, Any]:
+    if cdp.egress_boundary is None:
+        raise RuntimeError("CDP egress boundary must be active before navigation")
+    boundary_record_start = len(cdp.egress_boundary.records)
     network_event_start = len(cdp.events)
     cdp.call("Emulation.setEmulatedMedia", {"features":[{"name":"prefers-reduced-motion","value":"no-preference"}]})
     cdp.call("Emulation.setDeviceMetricsOverride", {"width": width, "height": height, "deviceScaleFactor": 1, "mobile": False, "screenWidth": width, "screenHeight": height})
@@ -891,11 +1031,11 @@ def run_viewport(cdp: CDP, url: str, out: Path, width: int, height: int) -> dict
     url_object_auth_scope = cdp.evaluate(
         """(async () => {
           const target = new URL(location.href);
-          target.hostname = target.hostname === '127.0.0.1' ? 'localhost' : '127.0.0.1';
-          target.pathname = '/health'; target.search = ''; target.hash = '';
-          if (target.origin === location.origin) return {attempted:false,passed:false};
-          try { await fetch(new URL(target.href)); } catch (_) {}
-          return {attempted:true,passed:true};
+          target.pathname = '/api/plugins/hermes-osb-panel/snapshot'; target.search = ''; target.hash = '';
+          try {
+            const response = await fetch(new URL(target.href));
+            return {attempted:true,passed:response.ok && target.origin === location.origin};
+          } catch (_) { return {attempted:true,passed:false}; }
         })()""",
         await_promise=True,
     )
@@ -928,12 +1068,55 @@ def run_viewport(cdp: CDP, url: str, out: Path, width: int, height: int) -> dict
     screenshot = out / f"second-brain-{width}x{height}.png"
     screenshot.write_bytes(base64.b64decode(shot["data"]))
     cdp.drain()
+    final_page = cdp.evaluate("({href:location.href,origin:location.origin})")
     errors = console_errors(cdp.events[event_start:])
     foreign_auth = foreign_auth_requests(cdp.events[network_event_start:], url)
+    blocked_egress = cdp.egress_boundary.blocked_since(boundary_record_start)
+    expected = urlsplit(url)
+    expected_origin = f"{expected.scheme}://{expected.netloc}"
     checks = invariant_checks(metrics, probes, width)
     checks.append({"name": "no_console_errors", "passed": not errors, "detail": errors})
     checks.append({"name": "no_cross_origin_auth", "passed": not foreign_auth, "detail": foreign_auth})
-    return {"viewport": {"width": width, "height": height}, "metrics": metrics, "probes": probes, "checks": checks, "console_errors": errors, "screenshot": str(screenshot)}
+    checks.append({"name": "egress_boundary", "passed": not blocked_egress, "detail": blocked_egress})
+    checks.append({
+        "name": "final_page_identity",
+        "passed": final_page == {"href": url, "origin": expected_origin},
+        "detail": final_page,
+    })
+    return {"viewport": {"width": width, "height": height}, "metrics": metrics, "probes": probes, "checks": checks, "console_errors": errors, "network": cdp.egress_boundary.records[boundary_record_start:], "screenshot": str(screenshot)}
+
+
+def chromium_command(chromium: str, port: int, profile: str, page_url: str) -> list[str]:
+    """Build fixed Chromium argv; --no-sandbox is not an OS sandbox claim."""
+
+    hostname = urlsplit(page_url).hostname
+    if hostname not in {"127.0.0.1", "localhost", "::1"}:
+        raise RuntimeError("unsafe Chromium resolver exception")
+    return [
+        chromium,
+        "--headless=new",
+        "--no-sandbox",
+        "--disable-gpu",
+        "--disable-dev-shm-usage",
+        "--hide-scrollbars",
+        "--disable-background-networking",
+        "--disable-client-side-phishing-detection",
+        "--disable-component-update",
+        "--disable-default-apps",
+        "--disable-domain-reliability",
+        "--disable-sync",
+        "--disable-translate",
+        "--metrics-recording-only",
+        "--no-first-run",
+        "--safebrowsing-disable-auto-update",
+        "--disable-features=AutofillServerCommunication,CertificateTransparencyComponentUpdater,OptimizationHints,MediaRouter,ServiceWorker",
+        "--no-proxy-server",
+        f"--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE {hostname}",
+        "--remote-allow-origins=*",
+        f"--remote-debugging-port={port}",
+        f"--user-data-dir={profile}",
+        "about:blank",
+    ]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -954,7 +1137,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("asset descriptors require --fixture")
     viewports = args.viewports or DEFAULT_VIEWPORTS
     args.output.mkdir(parents=True, exist_ok=True)
-    chromium = str(args.chromium.resolve()) if args.chromium else (shutil.which("chromium") or shutil.which("chromium-browser"))
+    chromium = str(args.chromium.absolute()) if args.chromium else (shutil.which("chromium") or shutil.which("chromium-browser"))
     if not chromium:
         raise SystemExit("Chromium not found; refusing to install a heavy dependency")
 
@@ -971,7 +1154,7 @@ def main(argv: list[str] | None = None) -> int:
         raise RuntimeError("CDP runner process group identity was unavailable")
     with tempfile.TemporaryDirectory(prefix="hermes-osb-cdp-") as profile:
         process = subprocess.Popen(
-            [chromium, "--headless=new", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", "--hide-scrollbars", "--remote-allow-origins=*", f"--remote-debugging-port={port}", f"--user-data-dir={profile}", "about:blank"],
+            chromium_command(chromium, port, profile, run_url),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=not args.inherit_runner_process_group,
@@ -1003,6 +1186,9 @@ def main(argv: list[str] | None = None) -> int:
             cdp = CDP(target["webSocketDebuggerUrl"])
             for domain in ("Page", "Runtime", "Log", "Network"):
                 cdp.call(f"{domain}.enable")
+            # Fetch interception is active before the first page navigation and
+            # remains active until the teardown below.
+            cdp.enable_egress_boundary(run_url, require_fixture_origin=bool(args.fixture))
             auth_cookie = None if args.fixture else local_auth_cookie(run_url)
             session_token = "" if args.fixture else os.environ.get("HERMES_DASHBOARD_SESSION_TOKEN", "").strip()
             if session_token:
@@ -1033,7 +1219,10 @@ def main(argv: list[str] | None = None) -> int:
             results = [run_viewport(cdp, run_url, args.output, width, height) for width, height in viewports]
         finally:
             if cdp:
-                cdp.close()
+                try:
+                    cdp.disable_egress_boundary()
+                finally:
+                    cdp.close()
             if chromium_pgid is None:
                 stop_inherited_process(process)
             else:
