@@ -17,7 +17,7 @@ import tempfile
 import time
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlsplit
@@ -39,6 +39,10 @@ SAFE_PATH = "/usr/bin:/bin"
 _REPO_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,99})/[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,99})\Z")
 _SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
 _SOCKET_INODE_RE = re.compile(r"socket:\[([1-9][0-9]*)\]\Z")
+_GENERATED_AT_RE = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
+    r"(?:\.[0-9]{6})?\+00:00\Z"
+)
 
 _DISABLED_COUNTS = {
     "preferences": 0,
@@ -77,6 +81,10 @@ class OwnedProcess:
     process: Any
     pgid: int
     harness_pgid: int | None = None
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def github_repo(value: str) -> str:
@@ -627,15 +635,26 @@ def _disabled_snapshot_contract() -> dict[str, Any]:
     }
 
 
-def _assert_snapshot(payload: Any) -> None:
+def _assert_snapshot(
+    payload: Any, *, generated_after: datetime, generated_before: datetime,
+) -> None:
     if not isinstance(payload, dict) or set(payload) != {"generated_at", *_disabled_snapshot_contract()}:
         raise QAFailure("snapshot contract failed")
     generated_at = payload.get("generated_at")
+    bounds = (generated_after, generated_before)
+    if any(
+        type(bound) is not datetime or bound.tzinfo is None or bound.utcoffset() is None
+        or bound.utcoffset() != timezone.utc.utcoffset(bound)
+        for bound in bounds
+    ) or generated_before < generated_after:
+        raise QAFailure("snapshot validation window was invalid")
+    if type(generated_at) is not str or _GENERATED_AT_RE.fullmatch(generated_at) is None:
+        raise QAFailure("snapshot contract failed")
     try:
-        parsed = datetime.fromisoformat(generated_at) if type(generated_at) is str else None
+        parsed = datetime.fromisoformat(generated_at)
     except ValueError as exc:
         raise QAFailure("snapshot contract failed") from exc
-    if parsed is None or parsed.tzinfo is None or parsed.utcoffset() is None:
+    if not generated_after <= parsed <= generated_before:
         raise QAFailure("snapshot contract failed")
     stable_payload = {key: value for key, value in payload.items() if key != "generated_at"}
     if not _strict_contract_equal(stable_payload, _disabled_snapshot_contract()):
@@ -690,7 +709,9 @@ def run_clean_install(
     popen: Callable[..., Any] = subprocess.Popen,
     fetch_json: Callable[[str, float], Any] | None = None,
     sleep: Callable[[float], None] = time.sleep, port_picker: Callable[[], int] = _free_port,
-    monotonic: Callable[[], float] = time.monotonic, which: Callable[..., str | None] = shutil.which,
+    monotonic: Callable[[], float] = time.monotonic,
+    wall_clock: Callable[[], datetime] = _utc_now,
+    which: Callable[..., str | None] = shutil.which,
     killpg: Callable[[int, int], None] = os.killpg, timeout: float = TOTAL_TIMEOUT,
     listener_owned: Callable[[OwnedProcess, int], bool] = _listener_is_owned,
     getpgrp: Callable[[], int] = os.getpgrp,
@@ -775,12 +796,21 @@ def run_clean_install(
                 sleep, monotonic,
             )
             _assert_health(health)
+            snapshot_deadline = min(operation_deadline, monotonic() + 5.0)
+            snapshot_window_start = wall_clock()
             snapshot = _fetch_owned_json(
                 active_fetch, base_url + f"/api/plugins/{PLUGIN_ID}/snapshot",
-                min(operation_deadline, monotonic() + 5.0), dashboard, port, listener_owned,
+                snapshot_deadline, dashboard, port, listener_owned,
                 sleep, monotonic,
             )
-            _assert_snapshot(snapshot)
+            _remaining(snapshot_deadline, monotonic)
+            snapshot_window_end = wall_clock()
+            _assert_snapshot(
+                snapshot,
+                generated_after=snapshot_window_start,
+                generated_before=snapshot_window_end,
+            )
+            _remaining(snapshot_deadline, monotonic)
 
             cdp = _spawn_owned(
                 popen,

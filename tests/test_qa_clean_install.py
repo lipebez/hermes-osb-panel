@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import unittest
 from copy import deepcopy
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -15,6 +16,7 @@ from scripts import qa_clean_install as qa
 
 SHA = "a" * 40
 PLUGIN = "hermes-osb-panel"
+SNAPSHOT_TIME = datetime(2026, 9, 17, 12, 0, tzinfo=timezone.utc)
 
 DISABLED_COUNTS = {
     "preferences": 0,
@@ -44,7 +46,7 @@ def disabled_health():
 def disabled_snapshot():
     return {
         "schema": "open-second-brain.dashboard.snapshot.v1",
-        "generated_at": "2026-09-17T12:00:00+00:00",
+        "generated_at": SNAPSHOT_TIME.isoformat(),
         "revision": "f5f601586348141c",
         "provider": deepcopy(DISABLED_PROVIDER),
         "nodes": [],
@@ -116,6 +118,7 @@ class Harness:
         self.fail_command = fail_command
         self.popen_env = None
         self.clock = Clock()
+        self.wall_clock = lambda: SNAPSHOT_TIME
 
     def run(self, command, **kwargs):
         self.calls.append(tuple(command))
@@ -200,6 +203,7 @@ class Harness:
             runner=self.run, popen=self.popen, fetch_json=self.fetch,
             sleep=self.clock.sleep, port_picker=lambda: 43123,
             monotonic=self.clock.monotonic, killpg=self.killpg,
+            wall_clock=self.wall_clock,
             listener_owned=lambda owned, port: True,
             getpgrp=lambda: 999,
             which=lambda value, path="": (
@@ -256,7 +260,9 @@ class ValidationTests(unittest.TestCase):
                 qa._assert_health(value)
 
     def test_snapshot_assertion_rejects_content_on_every_public_surface(self):
-        qa._assert_snapshot(disabled_snapshot())
+        qa._assert_snapshot(
+            disabled_snapshot(), generated_after=SNAPSHOT_TIME, generated_before=SNAPSHOT_TIME,
+        )
         mutations = {
             "schema": lambda p: p.__setitem__("schema", "PRIVATE_CANARY"),
             "generated_at": lambda p: p.__setitem__("generated_at", "PRIVATE_CANARY"),
@@ -290,7 +296,60 @@ class ValidationTests(unittest.TestCase):
                 payload = disabled_snapshot()
                 mutate(payload)
                 with self.assertRaises(qa.QAFailure):
-                    qa._assert_snapshot(payload)
+                    qa._assert_snapshot(
+                        payload, generated_after=SNAPSHOT_TIME, generated_before=SNAPSHOT_TIME,
+                    )
+
+    def test_snapshot_generated_at_matches_exact_producer_form_and_request_window(self):
+        request_start = SNAPSHOT_TIME
+        request_end = datetime(2026, 9, 17, 12, 0, 1, tzinfo=timezone.utc)
+        for value in (
+            "2026-09-17T12:00:00+00:00",
+            "2026-09-17T12:00:00.123456+00:00",
+            "2026-09-17T12:00:01+00:00",
+        ):
+            with self.subTest(valid=value):
+                payload = disabled_snapshot()
+                payload["generated_at"] = value
+                qa._assert_snapshot(
+                    payload, generated_after=request_start, generated_before=request_end,
+                )
+
+        invalid = {
+            "ancient": "0001-01-01T00:00:00+00:00",
+            "stale": "2026-09-17T11:59:59.999999+00:00",
+            "future": "2026-09-17T12:00:01.000001+00:00",
+            "max_year": "9999-12-31T23:59:59.999999+00:00",
+            "offset": "2026-09-17T13:00:00+01:00",
+            "zulu": "2026-09-17T12:00:00Z",
+            "week_date": "2026-W38-4T12:00:00+00:00",
+            "space_separator": "2026-09-17 12:00:00+00:00",
+            "arbitrary_separator": "2026-09-17x12:00:00+00:00",
+            "short_fraction": "2026-09-17T12:00:00.1+00:00",
+            "long_fraction": "2026-09-17T12:00:00.1234567+00:00",
+            "decimal_comma": "2026-09-17T12:00:00,123456+00:00",
+        }
+        for name, value in invalid.items():
+            with self.subTest(name=name), self.assertRaises(qa.QAFailure):
+                payload = disabled_snapshot()
+                payload["generated_at"] = value
+                qa._assert_snapshot(
+                    payload, generated_after=request_start, generated_before=request_end,
+                )
+
+    def test_snapshot_generated_at_rejects_invalid_trusted_window(self):
+        cases = (
+            (SNAPSHOT_TIME.replace(tzinfo=None), SNAPSHOT_TIME),
+            (SNAPSHOT_TIME, SNAPSHOT_TIME.replace(tzinfo=None)),
+            (SNAPSHOT_TIME, SNAPSHOT_TIME.replace(hour=11)),
+        )
+        for generated_after, generated_before in cases:
+            with self.subTest(after=generated_after, before=generated_before), self.assertRaises(qa.QAFailure):
+                qa._assert_snapshot(
+                    disabled_snapshot(),
+                    generated_after=generated_after,
+                    generated_before=generated_before,
+                )
 
 
 class CleanInstallTests(unittest.TestCase):
@@ -437,6 +496,31 @@ class CleanInstallTests(unittest.TestCase):
                     harness.execute()
                 self.assertTrue(harness.process.terminated)
                 self.assertFalse(harness.installed)
+
+    def test_snapshot_freshness_uses_wall_clock_bounds_around_the_fetch(self):
+        request_end = datetime(2026, 9, 17, 12, 0, 1, tzinfo=timezone.utc)
+        payload_time = "2026-09-17T12:00:00.500000+00:00"
+        harness = Harness(mutate={"snapshot": lambda value: {**value, "generated_at": payload_time}})
+        bounds = iter((SNAPSHOT_TIME, request_end))
+        harness.wall_clock = lambda: next(bounds)
+
+        self.assertEqual(harness.execute(), {"passed": True, "plugin": PLUGIN})
+
+    def test_snapshot_validation_remains_inside_monotonic_fetch_deadline(self):
+        harness = Harness()
+        original_fetch = harness.fetch
+
+        def fetch(url, timeout):
+            payload = original_fetch(url, timeout)
+            if url.endswith("/snapshot"):
+                harness.clock.now += 5.0
+            return payload
+
+        harness.fetch = fetch
+        with self.assertRaisesRegex(qa.QAFailure, "deadline"):
+            harness.execute()
+        self.assertTrue(harness.process.terminated)
+        self.assertFalse(harness.installed)
 
     def test_command_failures_are_bounded_and_cleanup_after_install(self):
         for command in ("plugins show", "plugins doctor"):
@@ -925,6 +1009,7 @@ class HardeningRegressionTests(unittest.TestCase):
             "owner/repo", SHA, environ={"PATH": "/tools"}, runner=harness.run,
             popen=harness.popen, fetch_json=harness.fetch, sleep=harness.clock.sleep,
             port_picker=lambda: next(ports), monotonic=harness.clock.monotonic,
+            wall_clock=lambda: SNAPSHOT_TIME,
             killpg=harness.killpg,
             listener_owned=lambda owned, port: True,
             getpgrp=lambda: 999,
