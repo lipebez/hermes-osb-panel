@@ -839,11 +839,12 @@ def main() -> int:
     parser.add_argument("--url", required=True, type=parse_loopback_url)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--fixture", type=Path, help="serve this sanitized fixture with source assets for shareable demo QA")
+    parser.add_argument("--chromium", type=Path, help="pre-resolved Chromium executable")
     parser.add_argument("--viewport", dest="viewports", action="append", type=parse_viewport, help="repeatable WIDTHxHEIGHT; defaults to 1440x900, 1024x768 and 390x844")
     args = parser.parse_args()
     viewports = args.viewports or DEFAULT_VIEWPORTS
     args.output.mkdir(parents=True, exist_ok=True)
-    chromium = shutil.which("chromium") or shutil.which("chromium-browser")
+    chromium = str(args.chromium.resolve()) if args.chromium else (shutil.which("chromium") or shutil.which("chromium-browser"))
     if not chromium:
         raise SystemExit("Chromium not found; refusing to install a heavy dependency")
 

@@ -32,29 +32,31 @@ class Clock:
 
 
 class Process:
-    def __init__(self):
+    next_pid = 41000
+
+    def __init__(self, returncode=0):
+        self.pid = Process.next_pid
+        Process.next_pid += 1
+        self.returncode = returncode
+        self.alive = True
         self.terminated = False
         self.killed = False
         self.waits = []
 
     def poll(self):
-        return None
-
-    def terminate(self):
-        self.terminated = True
+        return None if self.alive else self.returncode
 
     def wait(self, timeout=None):
         self.waits.append(timeout)
-        return 0
-
-    def kill(self):
-        self.killed = True
+        self.alive = False
+        return self.returncode
 
 
 class Harness:
     def __init__(self, *, mutate=None, fail_command=None):
         self.calls = []
         self.process = Process()
+        self.processes = [self.process]
         self.installed = False
         self.mutate = mutate or {}
         self.fail_command = fail_command
@@ -79,8 +81,20 @@ class Harness:
 
     def popen(self, command, **kwargs):
         self.calls.append(tuple(command))
-        self.popen_env = kwargs["env"]
-        return self.process
+        self.assert_session = kwargs.get("start_new_session")
+        if "dashboard" in command:
+            self.popen_env = kwargs["env"]
+            return self.process
+        process = Process(returncode=2 if self.fail_command == "qa_dashboard_cdp.py" else 0)
+        self.processes.append(process)
+        return process
+
+    def killpg(self, pgid, sig):
+        process = next(item for item in self.processes if item.pid == pgid)
+        if sig == qa.signal.SIGTERM:
+            process.terminated = True
+        elif sig == qa.signal.SIGKILL:
+            process.killed = True
 
     def fetch(self, url, timeout):
         self.calls.append(("GET", url))
@@ -122,12 +136,15 @@ class Harness:
             "HERMES_WEBUI_PASSWORD": "secret",
             "SOME_AUTH_TOKEN": "secret",
         })
-        with mock.patch.object(qa.time, "monotonic", side_effect=self.clock.monotonic):
-            return qa.run_clean_install(
-                "owner/repo", SHA, hermes="hermes", environ=env,
-                runner=self.run, popen=self.popen, fetch_json=self.fetch,
-                sleep=self.clock.sleep, port_picker=lambda: 43123,
-            )
+        return qa.run_clean_install(
+            "owner/repo", SHA, hermes="hermes", environ=env,
+            runner=self.run, popen=self.popen, fetch_json=self.fetch,
+            sleep=self.clock.sleep, port_picker=lambda: 43123,
+            monotonic=self.clock.monotonic, killpg=self.killpg,
+            which=lambda value, path="": (
+                "/opt/hermes/bin/hermes" if value == "hermes" else "/usr/bin/chromium"
+            ),
+        )
 
 
 class ValidationTests(unittest.TestCase):
@@ -265,9 +282,11 @@ class CleanInstallTests(unittest.TestCase):
         for needle in expected:
             cursor = next(i + 1 for i, action in enumerate(actions[cursor:], cursor) if needle in action)
         self.assertTrue(harness.process.terminated)
-        for key in qa.SENSITIVE_ENV_KEYS:
-            self.assertNotIn(key, harness.popen_env)
-        self.assertNotIn("SOME_AUTH_TOKEN", harness.popen_env)
+        self.assertEqual(
+            set(harness.popen_env),
+            {"HOME", "HERMES_HOME", "LANG", "LC_ALL", "PATH", "PYTHONDONTWRITEBYTECODE"},
+        )
+        self.assertEqual(harness.popen_env["PATH"], "/usr/bin:/bin")
         self.assertNotEqual(harness.popen_env["HOME"], os.environ.get("HOME"))
         self.assertTrue(Path(harness.popen_env["HOME"]).is_absolute())
         self.assertFalse(Path(harness.popen_env["HOME"]).exists())
@@ -292,7 +311,7 @@ class CleanInstallTests(unittest.TestCase):
                 self.assertFalse(harness.installed)
 
     def test_command_failures_are_bounded_and_cleanup_after_install(self):
-        for command in ("plugins show", "plugins doctor", "qa_dashboard_cdp.py"):
+        for command in ("plugins show", "plugins doctor"):
             with self.subTest(command=command):
                 harness = Harness(fail_command=command)
                 with self.assertRaisesRegex(qa.QAFailure, "command failed") as caught:
@@ -315,7 +334,7 @@ class CleanInstallTests(unittest.TestCase):
 
         exited = Harness()
         exited.process.poll = lambda: 3
-        with self.assertRaisesRegex(qa.QAFailure, "exited"):
+        with self.assertRaisesRegex(qa.QAFailure, "owned loopback port"):
             exited.execute()
         self.assertFalse(exited.installed)
 
@@ -340,6 +359,157 @@ class CleanInstallTests(unittest.TestCase):
         harness.execute()
         self.assertTrue(harness.process.terminated)
         self.assertTrue(harness.process.killed)
+
+
+class HardeningRegressionTests(unittest.TestCase):
+    def test_environment_is_a_minimal_allowlist_despite_canaries(self):
+        canaries = {
+            "PATH": "/tmp/evil", "OPENAI_API_KEY": "x", "AWS_PROFILE": "x",
+            "GOOGLE_APPLICATION_CREDENTIALS": "x", "SSH_AUTH_SOCK": "x",
+            "GIT_CONFIG_GLOBAL": "/tmp/x", "LD_PRELOAD": "/tmp/x.so",
+            "DYLD_INSERT_LIBRARIES": "/tmp/x", "PYTHONPATH": "/tmp/x",
+            "NODE_OPTIONS": "--require=/tmp/x", "HERMES_CONFIG": "/tmp/x",
+            "HERMES_WEB_DIST": "/tmp/x", "HTTP_PROXY": "http://proxy",
+            "BROWSER": "/tmp/x", "HERMES_AUTH_TOKEN": "x", "SESSION": "x",
+        }
+        env = qa._safe_env(canaries, Path("/tmp/home"), Path("/tmp/hermes"))
+        self.assertEqual(
+            env,
+            {"HOME": "/tmp/home", "HERMES_HOME": "/tmp/hermes", "LANG": "C.UTF-8",
+             "LC_ALL": "C.UTF-8", "PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1"},
+        )
+
+    def test_http_uses_no_proxy_no_redirect_opener_and_requires_json(self):
+        class Response:
+            headers = {"Content-Type": "application/json; charset=utf-8"}
+            def getcode(self):
+                return 200
+            def read(self, limit):
+                self.limit = limit
+                return b'{"ok": true}'
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+
+        response = Response()
+        opener = mock.Mock()
+        opener.open.return_value = response
+        loopback = "http:" + "//" + "127.0.0.1:43123/health"
+        with mock.patch.object(qa.urllib.request, "build_opener", return_value=opener) as build:
+            self.assertEqual(qa._fetch_json(loopback, 1.5, 43123), {"ok": True})
+        handlers = build.call_args.args
+        proxy = next(item for item in handlers if isinstance(item, qa.urllib.request.ProxyHandler))
+        self.assertEqual(proxy.proxies, {})
+        self.assertTrue(any(isinstance(item, qa._NoRedirect) for item in handlers))
+        self.assertEqual(response.limit, qa.MAX_RESPONSE_BYTES + 1)
+
+        for status, content_type, message in ((302, "application/json", "non-success"), (200, "text/html", "non-JSON")):
+            response.getcode = lambda value=status: value
+            response.headers = {"Content-Type": content_type}
+            with mock.patch.object(qa.urllib.request, "build_opener", return_value=opener):
+                with self.assertRaisesRegex(qa.QAFailure, message):
+                    qa._fetch_json(loopback, 1, 43123)
+        opener.open.side_effect = qa.urllib.error.HTTPError(loopback, 302, "redirect", {}, None)
+        with mock.patch.object(qa.urllib.request, "build_opener", return_value=opener):
+            with self.assertRaisesRegex(qa.QAFailure, "redirect was refused"):
+                qa._fetch_json(loopback, 1, 43123)
+
+    def test_http_rejects_every_destination_except_expected_ipv4_loopback(self):
+        bad = (
+            "https:" + "//" + "127.0.0.1:43123/x", "http:" + "//" + "localhost:43123/x",
+            "http:" + "//" + "127.0.0.1:43124/x", "http:" + "//" + "user@127.0.0.1:43123/x",
+            "http://example.test:43123/x",
+        )
+        with mock.patch.object(qa.urllib.request, "build_opener") as build:
+            for url in bad:
+                with self.subTest(url=url), self.assertRaisesRegex(qa.QAFailure, "owned loopback"):
+                    qa._fetch_json(url, 1, 43123)
+        build.assert_not_called()
+
+    def test_stop_signals_only_the_recorded_owned_group(self):
+        process = Process()
+        signals = []
+        qa._stop_owned(qa.OwnedProcess(process, process.pid), 5, lambda: 0, lambda pgid, sig: signals.append((pgid, sig)))
+        self.assertEqual(signals, [(process.pid, qa.signal.SIGTERM)])
+        with self.assertRaises(AttributeError):
+            qa._stop_owned(Process(), 5, lambda: 0, lambda pgid, sig: None)  # type: ignore[arg-type]
+
+    def test_global_deadline_bounds_commands_and_preserves_cancellation(self):
+        clock = Clock()
+        seen = []
+        def runner(command, **kwargs):
+            seen.append(kwargs["timeout"])
+            clock.now += 2
+            return subprocess.CompletedProcess(command, 0, "", "")
+        qa._run_checked(runner, ["/bin/true"], {}, 3, clock.monotonic)
+        self.assertEqual(seen, [3])
+        with self.assertRaisesRegex(qa.QAFailure, "deadline"):
+            qa._run_checked(runner, ["/bin/true"], {}, 1, clock.monotonic)
+
+        harness = Harness()
+        original = harness.run
+        def interrupt(command, **kwargs):
+            if command[1:3] == ["plugins", "doctor"]:
+                raise KeyboardInterrupt()
+            return original(command, **kwargs)
+        harness.run = interrupt
+        with self.assertRaises(KeyboardInterrupt):
+            harness.execute()
+        self.assertFalse(harness.installed)
+
+    def test_cdp_is_owned_and_cleaned_after_timeout(self):
+        harness = Harness()
+        original = harness.popen
+        def popen(command, **kwargs):
+            process = original(command, **kwargs)
+            if any(str(item).endswith("qa_dashboard_cdp.py") for item in command):
+                process.wait = lambda timeout=None: (_ for _ in ()).throw(subprocess.TimeoutExpired("cdp", timeout))
+            return process
+        harness.popen = popen
+        with self.assertRaises(qa.QAFailure):
+            harness.execute()
+        cdp = harness.processes[-1]
+        self.assertTrue(cdp.terminated)
+        self.assertTrue(cdp.killed)
+        self.assertTrue(harness.assert_session)
+
+    def test_port_retry_accepts_only_the_live_new_process(self):
+        harness = Harness()
+        first = harness.process
+        first.alive = False
+        second = Process()
+        harness.processes.append(second)
+        ports = iter((43123, 43124))
+        dashboard_starts = 0
+        original = harness.popen
+        def popen(command, **kwargs):
+            nonlocal dashboard_starts
+            if "dashboard" in command:
+                harness.calls.append(tuple(command))
+                harness.popen_env = kwargs["env"]
+                dashboard_starts += 1
+                return first if dashboard_starts == 1 else second
+            return original(command, **kwargs)
+        harness.popen = popen
+        result = qa.run_clean_install(
+            "owner/repo", SHA, environ={"PATH": "/tools"}, runner=harness.run,
+            popen=harness.popen, fetch_json=harness.fetch, sleep=harness.clock.sleep,
+            port_picker=lambda: next(ports), monotonic=harness.clock.monotonic,
+            killpg=harness.killpg,
+            which=lambda value, path="": "/opt/hermes" if value == "hermes" else "/opt/chromium",
+        )
+        self.assertTrue(result["passed"])
+        starts = [call for call in harness.calls if "dashboard" in call]
+        self.assertEqual(len(starts), 2)
+        self.assertIn("43123", starts[0])
+        self.assertIn("43124", starts[1])
+        self.assertTrue(second.terminated)
+
+    def test_ci_runs_discovery_once_without_duplicate_focused_step(self):
+        ci = (Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        self.assertEqual(ci.count("unittest discover"), 1)
+        self.assertNotIn("unittest tests.test_qa_clean_install", ci)
 
 
 if __name__ == "__main__":
