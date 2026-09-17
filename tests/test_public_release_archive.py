@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
 import subprocess
 import sys
 import tarfile
@@ -31,6 +32,13 @@ def archive_bytes(entries: dict[str, bytes]) -> bytes:
             member.size = len(content)
             archive.addfile(member, io.BytesIO(content))
     return output.getvalue()
+
+
+def corrupt_first_header(payload: bytes, start: int, stop: int, value: bytes) -> bytes:
+    assert len(value) == stop - start
+    corrupted = bytearray(payload)
+    corrupted[start:stop] = value
+    return bytes(corrupted)
 
 
 def sparse_pax_fixture() -> bytes:
@@ -123,6 +131,39 @@ class PublicReleaseArchiveScannerTests(unittest.TestCase):
         ).stdout
 
         self.assertEqual(scan_archive_bytes(payload), [])
+
+    def test_rejects_base256_and_non_octal_bytes_in_every_numeric_header_field(self):
+        payload = archive_bytes({"safe.txt": b"safe\n"})
+        fields = {
+            "mode": (100, 108),
+            "uid": (108, 116),
+            "gid": (116, 124),
+            "size": (124, 136),
+            "mtime": (136, 148),
+            "checksum": (148, 156),
+            "devmajor": (329, 337),
+            "devminor": (337, 345),
+        }
+        for label, (start, stop) in fields.items():
+            width = stop - start
+            for invalid in (b"\x80" + b"0" * (width - 1), b"8" + b"0" * (width - 1)):
+                with self.subTest(field=label, invalid=invalid[:1]), mock.patch(
+                    "scripts.check_public_release.tarfile.open",
+                    side_effect=AssertionError("tarfile.open must not be reached"),
+                ) as opened:
+                    with self.assertRaises(ValueError):
+                        scan_archive_bytes(corrupt_first_header(payload, start, stop, invalid))
+                opened.assert_not_called()
+
+    def test_rejects_nul_typeflag_before_tarfile_open(self):
+        payload = corrupt_first_header(archive_bytes({"safe.txt": b"safe\n"}), 156, 157, b"\0")
+        with mock.patch(
+            "scripts.check_public_release.tarfile.open",
+            side_effect=AssertionError("tarfile.open must not be reached"),
+        ) as opened:
+            with self.assertRaises(ValueError):
+                scan_archive_bytes(payload)
+        opened.assert_not_called()
 
     def test_sparse_pax_is_rejected_before_tarfile_open(self):
         payload = sparse_pax_fixture()
@@ -305,6 +346,21 @@ class GitArchiveProcessTests(unittest.TestCase):
             result = _git_archive_head(**kwargs)
         return result, children[0], time.monotonic() - started
 
+    def assert_process_group_absent(self, pgid: int) -> None:
+        with self.assertRaises(ProcessLookupError):
+            os.killpg(pgid, 0)
+
+    @staticmethod
+    def _descendant_source(output: bytes) -> str:
+        return (
+            "import os,signal,subprocess,sys,time; "
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "subprocess.Popen([sys.executable, '-c', 'import signal,time; "
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)']); "
+            "signal.signal(signal.SIGTERM, signal.SIG_DFL); "
+            f"os.write(1, {output!r}); time.sleep(60)"
+        )
+
     def test_short_process_returns_incrementally_read_payload(self):
         result, child, elapsed = self._run_child("import os; os.write(1, b'archive')", timeout_seconds=1.0)
         self.assertEqual(result, b"archive")
@@ -313,24 +369,57 @@ class GitArchiveProcessTests(unittest.TestCase):
 
     def test_trapped_process_is_bounded_and_cleaned_up(self):
         result, child, elapsed = self._run_child(
-            "import os,time; os.write(1, b'partial'); time.sleep(60)",
+            self._descendant_source(b"partial"),
             timeout_seconds=0.15,
             cleanup_grace_seconds=0.1,
         )
         self.assertIsNone(result)
         self.assertIsNotNone(child.poll())
+        self.assert_process_group_absent(child.pid)
         self.assertLess(elapsed, 1.0)
 
     def test_oversize_process_is_bounded_and_cleaned_up(self):
         result, child, elapsed = self._run_child(
-            "import os,time; os.write(1, b'x' * 2048); time.sleep(60)",
+            self._descendant_source(b"x" * 2048),
             timeout_seconds=1.0,
             cleanup_grace_seconds=0.1,
             max_archive_bytes=1024,
         )
         self.assertIsNone(result)
         self.assertIsNotNone(child.poll())
+        self.assert_process_group_absent(child.pid)
         self.assertLess(elapsed, 1.0)
+
+    def test_selector_baseexception_after_popen_is_preserved_and_cleans_up(self):
+        real_popen = subprocess.Popen
+        children: list[subprocess.Popen[bytes]] = []
+        marker = BaseException("selector setup failed")
+
+        def replacement(_command: object, **options: Any) -> subprocess.Popen[bytes]:
+            child = cast(subprocess.Popen[bytes], real_popen(
+                [sys.executable, "-c", self._descendant_source(b"ready")], **options
+            ))
+            children.append(child)
+            return child
+
+        caught: BaseException | None = None
+        with (
+            mock.patch("scripts.check_public_release.subprocess.Popen", side_effect=replacement),
+            mock.patch("scripts.check_public_release.selectors.DefaultSelector", side_effect=marker),
+        ):
+            try:
+                _git_archive_head(cleanup_grace_seconds=0.1)
+            except BaseException as error:
+                caught = error
+
+        self.assertIs(caught, marker)
+        child = children[0]
+        self.assertIsNotNone(child.stdout)
+        stdout = child.stdout
+        assert stdout is not None
+        self.assertTrue(stdout.closed)
+        self.assertIsNotNone(child.poll())
+        self.assert_process_group_absent(child.pid)
 
 
 if __name__ == "__main__":

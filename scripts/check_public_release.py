@@ -202,12 +202,23 @@ def _bounded_wait(process: subprocess.Popen[bytes], timeout: float) -> int | Non
         return None
 
 
-def _signal_process_group(process: subprocess.Popen[bytes], signum: int) -> None:
-    if process.poll() is None:
+def _signal_process_group(pgid: int, signum: int) -> None:
+    try:
+        os.killpg(pgid, signum)
+    except ProcessLookupError:
+        pass
+
+
+def _wait_process_group_absent(pgid: int, timeout: float) -> bool:
+    deadline = time.monotonic() + max(timeout, 0.001)
+    while True:
         try:
-            os.killpg(process.pid, signum)
+            os.killpg(pgid, 0)
         except ProcessLookupError:
-            pass
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
 
 
 def _git_archive_head(
@@ -223,13 +234,16 @@ def _git_archive_head(
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
-    assert process.stdout is not None
-    stdout = process.stdout
-    selector = selectors.DefaultSelector()
+    pgid = process.pid
+    stdout = None
+    selector = None
     failure: BaseException | None = None
     failure_traceback = None
     result: bytes | None = None
     try:
+        assert process.stdout is not None
+        stdout = process.stdout
+        selector = selectors.DefaultSelector()
         deadline = time.monotonic() + timeout_seconds
         descriptor = stdout.fileno()
         os.set_blocking(descriptor, False)
@@ -256,38 +270,52 @@ def _git_archive_head(
         failure = error
         failure_traceback = error.__traceback__
     finally:
-        try:
-            selector.close()
-        except BaseException as error:
-            if failure is None:
-                failure, failure_traceback = error, error.__traceback__
-        try:
-            stdout.close()
-        except BaseException as error:
-            if failure is None:
-                failure, failure_traceback = error, error.__traceback__
-        try:
-            _signal_process_group(process, signal.SIGTERM)
-        except BaseException as error:
-            if failure is None:
-                failure, failure_traceback = error, error.__traceback__
-        try:
-            stopped = _bounded_wait(process, cleanup_grace_seconds)
-        except BaseException as error:
-            stopped = None
-            if failure is None:
-                failure, failure_traceback = error, error.__traceback__
-        if stopped is None:
+        if selector is not None:
             try:
-                _signal_process_group(process, signal.SIGKILL)
+                selector.close()
+            except BaseException as error:
+                if failure is None:
+                    failure, failure_traceback = error, error.__traceback__
+        if stdout is None:
+            stdout = process.stdout
+        if stdout is not None:
+            try:
+                stdout.close()
+            except BaseException as error:
+                if failure is None:
+                    failure, failure_traceback = error, error.__traceback__
+        try:
+            _signal_process_group(pgid, signal.SIGTERM)
+        except BaseException as error:
+            if failure is None:
+                failure, failure_traceback = error, error.__traceback__
+        try:
+            _bounded_wait(process, cleanup_grace_seconds)
+        except BaseException as error:
+            if failure is None:
+                failure, failure_traceback = error, error.__traceback__
+        group_absent = False
+        try:
+            group_absent = _wait_process_group_absent(pgid, cleanup_grace_seconds)
+        except BaseException as error:
+            if failure is None:
+                failure, failure_traceback = error, error.__traceback__
+        if not group_absent:
+            try:
+                _signal_process_group(pgid, signal.SIGKILL)
             except BaseException as error:
                 if failure is None:
                     failure, failure_traceback = error, error.__traceback__
             try:
-                _bounded_wait(process, cleanup_grace_seconds)
+                _wait_process_group_absent(pgid, cleanup_grace_seconds)
             except BaseException as error:
                 if failure is None:
                     failure, failure_traceback = error, error.__traceback__
+        try:
+            _bounded_wait(process, cleanup_grace_seconds)
+        except BaseException as error:
+            if failure is None:
+                failure, failure_traceback = error, error.__traceback__
     if failure is not None:
         raise failure.with_traceback(failure_traceback)
     return result

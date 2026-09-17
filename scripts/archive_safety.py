@@ -8,24 +8,42 @@ import re
 
 BLOCK_SIZE = 512
 MAX_ARCHIVE_BYTES = 8 * 1024 * 1024
-_ALLOWED_TYPES = frozenset((b"\0", b"0", b"5"))
+_ALLOWED_TYPES = frozenset((b"0", b"5"))
 _GIT_GLOBAL_NAME = b"pax_global_header"
 _GIT_COMMENT = re.compile(rb"52 comment=[0-9a-f]{40}\n\Z")
+_CHECKSUM = re.compile(rb"(?:[0-7]{6}\0 |[0-7]{6}  |[0-7]{7}\0)\Z")
+
+_NUMERIC_FIELDS = (
+    ("mode", 100, 108),
+    ("uid", 108, 116),
+    ("gid", 116, 124),
+    ("size", 124, 136),
+    ("mtime", 136, 148),
+    ("devmajor", 329, 337),
+    ("devminor", 337, 345),
+)
 
 
-def _octal_size(field: bytes) -> int:
-    """Parse a POSIX tar size field, rejecting base-256 and malformed forms."""
-    if len(field) != 12 or field[0] & 0x80:
-        raise ValueError("unsafe tar size")
-    nul = field.find(b"\0")
-    if nul >= 0:
-        if any(byte not in (0, 32) for byte in field[nul:]):
-            raise ValueError("unsafe tar size")
-        field = field[:nul]
-    digits = field.strip(b" ")
-    if not digits or any(byte < ord("0") or byte > ord("7") for byte in digits):
-        raise ValueError("unsafe tar size")
-    return int(digits, 8)
+def _octal_field(field: bytes, label: str) -> int:
+    """Parse a padded POSIX octal field without accepting base-256."""
+    if field and field[0] & 0x80:
+        raise ValueError(f"unsafe tar {label}")
+    if re.fullmatch(rb"[\0 ]*", field):
+        return 0
+    match = re.fullmatch(rb" *([0-7]+)(?:\0[\0 ]*| *)", field)
+    if match is None:
+        raise ValueError(f"unsafe tar {label}")
+    return int(match.group(1), 8)
+
+
+def _validate_numeric_fields(header: bytes) -> int:
+    values = {
+        label: _octal_field(header[start:stop], label)
+        for label, start, stop in _NUMERIC_FIELDS
+    }
+    if _CHECKSUM.fullmatch(header[148:156]) is None:
+        raise ValueError("unsafe tar checksum")
+    return values["size"]
 
 
 def preflight_tar_bytes(payload: bytes, *, max_archive_bytes: int = MAX_ARCHIVE_BYTES) -> None:
@@ -46,7 +64,7 @@ def preflight_tar_bytes(payload: bytes, *, max_archive_bytes: int = MAX_ARCHIVE_
             return
 
         typeflag = header[156:157]
-        size = _octal_size(header[124:136])
+        size = _validate_numeric_fields(header)
         data_start = offset + BLOCK_SIZE
         padded_size = ((size + BLOCK_SIZE - 1) // BLOCK_SIZE) * BLOCK_SIZE
         next_offset = data_start + padded_size
