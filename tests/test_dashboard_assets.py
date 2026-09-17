@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
+import threading
+import time
 import tomllib
 import unittest
+import urllib.error
+import urllib.request
+from contextlib import contextmanager
+from socketserver import BaseRequestHandler, ThreadingTCPServer
 from pathlib import Path
 from unittest.mock import patch
 
@@ -17,6 +27,589 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class DashboardAssetTests(unittest.TestCase):
+    def test_browser_proxy_forwards_only_exact_fixture_origin_without_dns(self):
+        fixture = ROOT / "tests" / "fixtures" / "demo_snapshot_v1.json"
+        with qa_dashboard_cdp.demo_server(fixture, b"js", b"css") as url:
+            with qa_dashboard_cdp.browser_proxy(url) as (boundary, proxy_port):
+                exact = url.rsplit("/", 1)[0] + "/assets/index.js"
+                connection = qa_dashboard_cdp.http.client.HTTPConnection("127.0.0.1", proxy_port)
+                connection.request("GET", exact, headers={"Host": url.split("/", 3)[2]})
+                self.assertEqual(connection.getresponse().read(), b"js")
+                connection.close()
+
+                connection = qa_dashboard_cdp.http.client.HTTPConnection("127.0.0.1", proxy_port)
+                connection.connect()
+                with patch.object(qa_dashboard_cdp.socket, "getaddrinfo", side_effect=AssertionError("denial must not resolve")):
+                    connection.request("GET", "http://example.invalid/nope", headers={"Host": "example.invalid"})
+                    self.assertEqual(connection.getresponse().status, 403)
+                    connection.close()
+            self.assertTrue(boundary.blocked())
+
+    def test_browser_proxy_rejects_non_exact_targets_and_sanitizes_denials(self):
+        fixture_origin = "http:" + "//" + "127.0.0.1:8123"
+        credential_target = "http:" + "//" + "user:" + "secret@127.0.0.1:8123/private?" + "token=secret#fragment"
+        boundary = qa_dashboard_cdp.BrowserProxyBoundary(fixture_origin + "/second-brain")
+        denied = (
+            ("CONNECT", "127.0.0.1:8123", "127.0.0.1:8123", "connect_denied"),
+            ("GET", "/relative", "127.0.0.1:8123", "origin_denied"),
+            ("GET", "http:" + "//" + "localhost:8123/alias", "localhost:8123", "origin_denied"),
+            ("GET", "http:" + "//" + "[::1]:8123/alias", "[::1]:8123", "origin_denied"),
+            ("GET", "http:" + "//" + "127.0.0.1:8124/port", "127.0.0.1:8124", "origin_denied"),
+            ("GET", "https:" + "//" + "127.0.0.1:8123/scheme", "127.0.0.1:8123", "origin_denied"),
+            ("GET", fixture_origin + "/host", "localhost:8123", "host_denied"),
+            ("GET", credential_target, "127.0.0.1:8123", "origin_denied"),
+        )
+        with patch.object(qa_dashboard_cdp.socket, "getaddrinfo", side_effect=AssertionError("denial must not resolve")) as resolver:
+            for method, target, host, reason in denied:
+                with self.subTest(target=target, host=host):
+                    self.assertEqual(boundary.authorize(method, target, host), (False, reason))
+                    boundary.record("proxy-denied", target, False, reason=reason)
+        resolver.assert_not_called()
+        serialized = json.dumps(boundary.blocked())
+        self.assertNotIn("secret", serialized)
+        self.assertNotIn("token=", serialized)
+        self.assertNotIn("fragment", serialized)
+        self.assertIn("/private", serialized)
+
+    def test_chromium_global_proxy_flags_cover_loopback_and_non_proxy_udp(self):
+        fixture_url = "http:" + "//" + "127.0.0.1:8123/second-brain"
+        command = qa_dashboard_cdp.chromium_command(
+            "/usr/bin/chromium", 9222, "/tmp/profile", fixture_url, 8118,
+            redirect_browser_internals=True,
+        )
+        self.assertIn("--proxy-server=" + "http:" + "//" + "127.0.0.1:8118", command)
+        self.assertIn("--proxy-bypass-list=<-loopback>", command)
+        self.assertIn("--disable-quic", command)
+        self.assertIn("--force-webrtc-ip-handling-policy=disable_non_proxied_udp", command)
+        self.assertIn("--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1", command)
+        self.assertNotIn("--no-proxy-server", command)
+
+        disabled = next(item for item in command if item.startswith("--disable-features="))
+        disabled_features = set(disabled.split("=", 1)[1].split(","))
+        self.assertTrue({
+            "NetworkTimeServiceQuerying",
+            "SearchEnginePreconnector",
+            "DefaultSearchEnginePrewarm",
+            "PreconnectToSearch",
+        }.issubset(disabled_features))
+        origin = fixture_url.rsplit("/", 1)[0]
+        for switch, path in qa_dashboard_cdp.BROWSER_INTERNAL_ENDPOINTS:
+            self.assertIn(f"--{switch}={origin}{path}", command)
+        self.assertEqual(
+            qa_dashboard_cdp.BROWSER_INTERNAL_RESERVED_PATHS,
+            {
+                qa_dashboard_cdp.BROWSER_INTERNAL_PREFIX + "gcm-checkin",
+                qa_dashboard_cdp.BROWSER_INTERNAL_PREFIX + "gcm-mcs",
+            },
+        )
+        self.assertTrue(qa_dashboard_cdp.BROWSER_INTERNAL_RESERVED_PATHS.isdisjoint({
+            "/", "/second-brain", "/assets/index.js", "/assets/style.css",
+            "/api/plugins/hermes-osb-panel/snapshot",
+        }))
+
+        live_command = qa_dashboard_cdp.chromium_command(
+            "/usr/bin/chromium", 9222, "/tmp/profile", fixture_url, 8118,
+            redirect_browser_internals=False,
+        )
+        self.assertFalse(any(any(item.startswith(f"--{switch}=") for switch, _ in qa_dashboard_cdp.BROWSER_INTERNAL_ENDPOINTS) for item in live_command))
+
+    def test_fixture_server_reserves_browser_internal_paths_without_asset_or_api_overlap(self):
+        fixture = ROOT / "tests" / "fixtures" / "demo_snapshot_v1.json"
+        request_log: list[str] = []
+        with qa_dashboard_cdp.demo_server(fixture, b"js", b"css", request_log=request_log) as url:
+            origin = url.rsplit("/", 1)[0]
+            for path in sorted(qa_dashboard_cdp.BROWSER_INTERNAL_RESERVED_PATHS):
+                request = urllib.request.Request(origin + path, method="GET")
+                with urllib.request.urlopen(request) as response:
+                    self.assertEqual(response.status, 204)
+                    self.assertEqual(response.read(), b"")
+            with self.assertRaises(urllib.error.HTTPError) as unknown:
+                urllib.request.urlopen(origin + qa_dashboard_cdp.BROWSER_INTERNAL_PREFIX + "unknown")
+            self.assertEqual(unknown.exception.code, 404)
+            request = urllib.request.Request(
+                origin + "/api/plugins/hermes-osb-panel/snapshot", data=b"", method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as api_post:
+                urllib.request.urlopen(request)
+            self.assertEqual(api_post.exception.code, 404)
+
+        self.assertEqual(
+            request_log[:-2],
+            sorted(qa_dashboard_cdp.BROWSER_INTERNAL_RESERVED_PATHS),
+        )
+        self.assertEqual(request_log[-2:], [
+            qa_dashboard_cdp.BROWSER_INTERNAL_PREFIX + "unknown",
+            "/api/plugins/hermes-osb-panel/snapshot",
+        ])
+
+    def test_cleanup_preserves_first_baseexception_and_stops_process_and_servers(self):
+        class DisableFailure(BaseException):
+            pass
+
+        disable_attempts = 0
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            start_new_session=True,
+        )
+        servers = [ThreadingTCPServer(("127.0.0.1", 0), BaseRequestHandler) for _ in range(2)]
+        threads = [threading.Thread(target=server.serve_forever, daemon=True) for server in servers]
+        for thread in threads:
+            thread.start()
+
+        def disable():
+            nonlocal disable_attempts
+            disable_attempts += 1
+            raise DisableFailure("disable-first")
+
+        def close():
+            raise KeyboardInterrupt("close-second")
+
+        def close_server(server, thread):
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+        steps = [disable, close, lambda: qa_dashboard_cdp.stop_owned_group(process, process.pid)]
+        steps.extend(lambda s=s, t=t: close_server(s, t) for s, t in zip(servers, threads))
+        with self.assertRaisesRegex(DisableFailure, "disable-first"):
+            qa_dashboard_cdp.run_cleanup_steps(None, steps)
+
+        self.assertEqual(disable_attempts, 2)
+        self.assertIsNotNone(process.poll())
+        self.assertTrue(all(server.fileno() == -1 for server in servers))
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+
+    def test_cleanup_resumes_interrupted_real_process_stop_and_preserves_identity(self):
+        class StopInterrupted(BaseException):
+            pass
+
+        cancellation = StopInterrupted("stop-first")
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            start_new_session=True,
+        )
+        profile = tempfile.TemporaryDirectory(prefix="cleanup-profile-")
+        profile_path = Path(profile.name)
+        server = ThreadingTCPServer(("127.0.0.1", 0), BaseRequestHandler)
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        stop_attempts = 0
+        later_steps: list[str] = []
+        original_killpg = qa_dashboard_cdp.os.killpg
+        interrupted = False
+
+        def interrupted_stop():
+            nonlocal stop_attempts
+            stop_attempts += 1
+            qa_dashboard_cdp.stop_owned_group(process, process.pid)
+
+        def interrupt_killpg(pgid, sig):
+            nonlocal interrupted
+            if not interrupted and sig == 0:
+                interrupted = True
+                raise cancellation
+            return original_killpg(pgid, sig)
+
+        def close_profile():
+            profile.cleanup()
+            later_steps.append("profile")
+
+        def close_server():
+            server.shutdown()
+            server.server_close()
+            server_thread.join(timeout=3)
+            later_steps.append("servers")
+
+        try:
+            with (
+                patch.object(qa_dashboard_cdp.os, "killpg", side_effect=interrupt_killpg),
+                self.assertRaises(StopInterrupted) as raised,
+            ):
+                qa_dashboard_cdp.run_cleanup_steps(
+                    None,
+                    [
+                        interrupted_stop,
+                        close_profile,
+                        close_server,
+                    ],
+                )
+        finally:
+            if process.poll() is None:
+                qa_dashboard_cdp.stop_owned_group(process, process.pid)
+            if profile_path.exists():
+                profile.cleanup()
+            if server.fileno() != -1:
+                server.shutdown()
+                server.server_close()
+            server_thread.join(timeout=3)
+
+        self.assertIs(raised.exception, cancellation)
+        self.assertEqual(stop_attempts, 2)
+        self.assertIsNotNone(process.poll())
+        self.assertEqual(later_steps, ["profile", "servers"])
+        self.assertFalse(profile_path.exists())
+        self.assertEqual(server.fileno(), -1)
+        self.assertFalse(server_thread.is_alive())
+
+    def test_demo_server_cleanup_resumes_interrupted_shutdown(self):
+        class ShutdownInterrupted(BaseException):
+            pass
+
+        cancellation = ShutdownInterrupted("shutdown-first")
+        original_server = qa_dashboard_cdp.ThreadingHTTPServer
+        created = []
+        shutdown_attempts = 0
+
+        def interruptible_server(*args, **kwargs):
+            nonlocal shutdown_attempts
+            server = original_server(*args, **kwargs)
+            original_shutdown = server.shutdown
+
+            def shutdown():
+                nonlocal shutdown_attempts
+                shutdown_attempts += 1
+                if shutdown_attempts == 1:
+                    raise cancellation
+                return original_shutdown()
+
+            server.shutdown = shutdown
+            created.append(server)
+            return server
+
+        fixture = ROOT / "tests" / "fixtures" / "demo_snapshot_v1.json"
+        with patch.object(qa_dashboard_cdp, "ThreadingHTTPServer", side_effect=interruptible_server):
+            context = qa_dashboard_cdp.demo_server(fixture, b"js", b"css")
+            context.__enter__()
+            with self.assertRaises(ShutdownInterrupted) as raised:
+                context.__exit__(None, None, None)
+
+        self.assertIs(raised.exception, cancellation)
+        self.assertEqual(shutdown_attempts, 2)
+        self.assertEqual(len(created), 1)
+        self.assertEqual(created[0].fileno(), -1)
+
+    @unittest.skipUnless(hasattr(os, "memfd_create"), "Linux memfd required")
+    def test_main_teardown_survives_cdp_baseexceptions_and_closes_real_resources(self):
+        class DisableFailure(BaseException):
+            pass
+
+        class FakeCDP:
+            events = []
+
+            def __init__(self, url):
+                self.url = url
+
+            def call(self, method, params=None):
+                return {}
+
+            def enable_egress_boundary(self, url, require_fixture_origin=True):
+                self.boundary = (url, require_fixture_origin)
+
+            def disable_egress_boundary(self):
+                raise DisableFailure("disable-first")
+
+            def close(self):
+                raise KeyboardInterrupt("close-second")
+
+        fixture = ROOT / "tests" / "fixtures" / "demo_snapshot_v1.json"
+        original_demo_server = qa_dashboard_cdp.demo_server
+        original_browser_proxy = qa_dashboard_cdp.browser_proxy
+        ports: list[int] = []
+
+        @contextmanager
+        def tracked_demo(*args, **kwargs):
+            with original_demo_server(*args, **kwargs) as url:
+                ports.append(int(url.split(":")[2].split("/")[0]))
+                yield url
+
+        @contextmanager
+        def tracked_proxy(*args, **kwargs):
+            with original_browser_proxy(*args, **kwargs) as value:
+                ports.append(value[1])
+                yield value
+
+        process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+        js_fd = qa_dashboard_cdp.create_sealed_memfd("teardown-js", b"js")
+        css_fd = qa_dashboard_cdp.create_sealed_memfd("teardown-css", b"css")
+        captured_command: list[str] = []
+
+        def return_process(command, **kwargs):
+            captured_command.extend(command)
+            self.assertTrue(kwargs["start_new_session"])
+            return process
+
+        try:
+            with (
+                tempfile.TemporaryDirectory() as output,
+                patch.object(qa_dashboard_cdp, "demo_server", side_effect=tracked_demo),
+                patch.object(qa_dashboard_cdp, "browser_proxy", side_effect=tracked_proxy),
+                patch.object(qa_dashboard_cdp.subprocess, "Popen", side_effect=return_process),
+                patch.object(qa_dashboard_cdp, "get_json", return_value=[{"type": "page", "webSocketDebuggerUrl": "ws://test"}]),
+                patch.object(qa_dashboard_cdp, "CDP", FakeCDP),
+                patch.object(qa_dashboard_cdp, "run_viewport", return_value={
+                    "viewport": {"width": 390, "height": 844}, "checks": [],
+                    "metrics": {}, "probes": {}, "console_errors": [], "screenshot": "shot.png",
+                }),
+            ):
+                with self.assertRaisesRegex(DisableFailure, "disable-first"):
+                    qa_dashboard_cdp.main([
+                        "--url", "http:" + "//" + "127.0.0.1:1/second-brain", "--output", output,
+                        "--fixture", str(fixture), "--asset-js-fd", str(js_fd),
+                        "--asset-css-fd", str(css_fd), "--chromium", "/bin/true",
+                        "--viewport", "390x844",
+                    ])
+        finally:
+            if process.poll() is None:
+                qa_dashboard_cdp.stop_owned_group(process, process.pid)
+
+        profile_arg = next(item for item in captured_command if item.startswith("--user-data-dir="))
+        self.assertFalse(Path(profile_arg.split("=", 1)[1]).exists())
+        self.assertIsNotNone(process.poll())
+        self.assertEqual(len(ports), 2)
+        for port in ports:
+            with self.subTest(port=port), qa_dashboard_cdp.socket.socket() as probe:
+                self.assertNotEqual(probe.connect_ex(("127.0.0.1", port)), 0)
+
+    def test_cdp_egress_boundary_allows_only_exact_fixture_origin(self):
+        ipv4 = "127.0.0.1"
+        local_name = "localhost"
+        ipv6 = "::1"
+        boundary = qa_dashboard_cdp.EgressBoundary(f"http://{ipv4}:8123/second-brain")
+
+        self.assertTrue(boundary.allows(f"http://{ipv4}:8123/assets/index.js"))
+        self.assertTrue(boundary.allows("data:text/plain,fixture"))
+        self.assertTrue(boundary.allows(f"blob:http://{ipv4}:8123/id"))
+        for url in (
+            f"http://{ipv4}:8124/",
+            f"http://{local_name}:8123/",
+            f"http://[{ipv6}]:8123/",
+            f"https://{ipv4}:8123/",
+            f"ws://{ipv4}:8123/",
+            f"wss://{ipv4}:8123/",
+            "file:///etc/passwd",
+            "chrome-extension://fixture/page.html",
+            "http://example.invalid/",
+        ):
+            with self.subTest(url=url):
+                self.assertFalse(boundary.allows(url))
+
+    @unittest.skipUnless(
+        hasattr(os, "memfd_create")
+        and shutil.which("chromium")
+        and importlib.util.find_spec("websocket") is not None,
+        "Linux Chromium and websocket-client required",
+    )
+    def test_real_clean_chromium_fixture_has_no_browser_global_denials(self):
+        chromium = shutil.which("chromium")
+        assert chromium is not None
+        fixture = ROOT / "tests" / "fixtures" / "demo_snapshot_v1.json"
+        installed_js = (ROOT / "dashboard" / "dist" / "index.js").read_bytes()
+        installed_css = (ROOT / "dashboard" / "dist" / "style.css").read_bytes()
+        js_fd = qa_dashboard_cdp.create_sealed_memfd("clean-egress-js", installed_js)
+        css_fd = qa_dashboard_cdp.create_sealed_memfd("clean-egress-css", installed_css)
+        request_log: list[str] = []
+        proxy_records: list[dict[str, object]] = []
+        original_demo_server = qa_dashboard_cdp.demo_server
+        original_browser_proxy = qa_dashboard_cdp.browser_proxy
+
+        @contextmanager
+        def probing_server(path, javascript, stylesheet):
+            with original_demo_server(path, javascript, stylesheet, request_log=request_log) as url:
+                yield url
+
+        @contextmanager
+        def probing_proxy(url, require_fixture_origin=True):
+            with original_browser_proxy(url, require_fixture_origin=require_fixture_origin) as value:
+                boundary, _ = value
+                yield value
+                proxy_records.extend(boundary.snapshot())
+
+        def network_probe(cdp, url, output, width, height, browser_boundary):
+            cdp.call("Page.navigate", {"url": url})
+            qa_dashboard_cdp.wait_for(cdp, "document.readyState === 'complete'")
+            time.sleep(3)
+            cdp.drain()
+            blocked = browser_boundary.blocked()
+            return {
+                "viewport": {"width": width, "height": height}, "metrics": {}, "probes": {},
+                "checks": [{"name": "browser_global_egress_boundary", "passed": not blocked, "detail": blocked}],
+                "console_errors": [], "browser_network": browser_boundary.snapshot(), "screenshot": "",
+            }
+
+        with (
+            tempfile.TemporaryDirectory() as output,
+            patch.object(qa_dashboard_cdp, "demo_server", side_effect=probing_server),
+            patch.object(qa_dashboard_cdp, "browser_proxy", side_effect=probing_proxy),
+            patch.object(qa_dashboard_cdp, "run_viewport", side_effect=network_probe),
+        ):
+            result = qa_dashboard_cdp.main([
+                "--url", "http:" + "//" + "127.0.0.1:1/second-brain",
+                "--output", output,
+                "--fixture", str(fixture),
+                "--asset-js-fd", str(js_fd),
+                "--asset-css-fd", str(css_fd),
+                "--chromium", chromium,
+                "--viewport", "390x844",
+            ])
+            report = json.loads((Path(output) / "report.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(result, 0)
+        self.assertTrue(report["passed"])
+        self.assertEqual([item for item in proxy_records if not item["allowed"]], [])
+        internal_requests = [path for path in request_log if path.startswith(qa_dashboard_cdp.BROWSER_INTERNAL_PREFIX)]
+        self.assertTrue(internal_requests)
+        self.assertTrue(set(internal_requests).issubset(qa_dashboard_cdp.BROWSER_INTERNAL_RESERVED_PATHS))
+
+    @unittest.skipUnless(
+        hasattr(os, "memfd_create")
+        and shutil.which("chromium")
+        and importlib.util.find_spec("websocket") is not None,
+        "Linux Chromium and websocket-client required",
+    )
+    def test_real_chromium_blocks_and_fails_all_fixture_egress_attempts(self):
+        class CanaryHandler(BaseRequestHandler):
+            def handle(inner_self):
+                canary_hits.append(inner_self.request.recv(80))
+
+        canary_hits: list[bytes] = []
+        canary = ThreadingTCPServer(("127.0.0.1", 0), CanaryHandler)
+        canary_thread = threading.Thread(target=canary.serve_forever, daemon=True)
+        canary_thread.start()
+        port = canary.server_address[1]
+        attacks = f"""
+window.addEventListener('load', () => setTimeout(() => {{
+  for (const url of [
+    'http://example.invalid/internet',
+    'http://127.0.0.1:{port}/other-port',
+    'http://localhost:{port}/localhost-alias',
+    'http://[::1]:{port}/ipv6-alias',
+    'https://127.0.0.1:{port}/https-scheme',
+    '/__qa_redirect'
+  ]) fetch(url).catch(() => {{}});
+  for (const url of ['ws://127.0.0.1:{port}/ws', 'wss://127.0.0.1:{port}/wss']) {{
+    try {{ const socket = new WebSocket(url); socket.onerror = () => {{}}; }} catch (_) {{}}
+  }}
+  navigator.serviceWorker.register('/__qa_service_worker.js').catch(() => {{}});
+  try {{ window.open('http://127.0.0.1:{port}/popup-target', '_blank'); }} catch (_) {{}}
+}}, 400));
+""".encode()
+        service_worker_script = f"""
+self.addEventListener('install', event => event.waitUntil(self.skipWaiting()));
+self.addEventListener('activate', event => event.waitUntil((async () => {{
+  await self.clients.claim();
+  try {{ await fetch('http://127.0.0.1:{port}/service-worker-target'); }} catch (_) {{}}
+  try {{ await fetch('/__qa_redirect'); }} catch (_) {{}}
+}})()));
+""".encode()
+        installed_js = (ROOT / "dashboard" / "dist" / "index.js").read_bytes() + attacks
+        installed_css = (ROOT / "dashboard" / "dist" / "style.css").read_bytes()
+        fixture = ROOT / "tests" / "fixtures" / "demo_snapshot_v1.json"
+        request_log: list[str] = []
+        original_demo_server = qa_dashboard_cdp.demo_server
+        original_browser_proxy = qa_dashboard_cdp.browser_proxy
+        proxy_records: list[dict[str, object]] = []
+
+        @contextmanager
+        def probing_server(path, javascript, stylesheet):
+            with original_demo_server(
+                path,
+                javascript,
+                stylesheet,
+                redirect_target=f"http://127.0.0.1:{port}/redirect-target",
+                request_log=request_log,
+                service_worker_script=service_worker_script,
+            ) as url:
+                yield url
+
+        @contextmanager
+        def probing_proxy(url, require_fixture_origin=True):
+            with original_browser_proxy(url, require_fixture_origin=require_fixture_origin) as value:
+                boundary, _ = value
+                yield value
+                proxy_records.extend(boundary.snapshot())
+
+        js_fd = qa_dashboard_cdp.create_sealed_memfd("egress-js", installed_js)
+        css_fd = qa_dashboard_cdp.create_sealed_memfd("egress-css", installed_css)
+
+        def network_probe(cdp, url, output, width, height, browser_boundary):
+            cdp.call("Page.navigate", {"url": url})
+            qa_dashboard_cdp.wait_for(cdp, "document.readyState === 'complete'")
+            time.sleep(3)
+            cdp.drain()
+            blocked = browser_boundary.blocked()
+            return {
+                "viewport": {"width": width, "height": height}, "metrics": {}, "probes": {},
+                "checks": [{"name": "browser_global_egress_boundary", "passed": not blocked, "detail": blocked}],
+                "console_errors": [], "browser_network": browser_boundary.snapshot(), "screenshot": "",
+            }
+
+        try:
+            with (
+                tempfile.TemporaryDirectory() as output,
+                patch.object(qa_dashboard_cdp, "demo_server", side_effect=probing_server),
+                patch.object(qa_dashboard_cdp, "browser_proxy", side_effect=probing_proxy),
+                patch.object(qa_dashboard_cdp, "run_viewport", side_effect=network_probe),
+            ):
+                result = qa_dashboard_cdp.main([
+                    "--url", f"http://{'127.0.0.1'}:1/second-brain",
+                    "--output", output,
+                    "--fixture", str(fixture),
+                    "--asset-js-fd", str(js_fd),
+                    "--asset-css-fd", str(css_fd),
+                    "--chromium", shutil.which("chromium"),
+                    "--viewport", "390x844",
+                ])
+                report = json.loads((Path(output) / "report.json").read_text(encoding="utf-8"))
+        finally:
+            canary.shutdown()
+            canary.server_close()
+            canary_thread.join(timeout=3)
+
+        self.assertEqual(result, 1)
+        self.assertIn("390x844:browser_global_egress_boundary", report["failures"])
+        self.assertEqual(canary_hits, [])
+        self.assertIn("/assets/index.js", request_log)
+        self.assertIn("/api/plugins/hermes-osb-panel/snapshot", request_log)
+        self.assertIn("/__qa_redirect", request_log)
+        denied = [item for item in proxy_records if not item["allowed"]]
+        denied_urls = " ".join(item["url"] for item in denied)
+        self.assertIn("popup-target", denied_urls)
+        self.assertIn("service-worker-target", denied_urls)
+        self.assertIn("redirect-target", denied_urls)
+
+    def test_fixture_server_serves_only_explicit_installed_asset_bytes(self):
+        fixture = ROOT / "tests" / "fixtures" / "demo_snapshot_v1.json"
+        checkout_js = (ROOT / "dashboard" / "dist" / "index.js").read_bytes()
+        with tempfile.TemporaryDirectory() as temporary:
+            assets = Path(temporary) / "installed" / "dist"
+            assets.mkdir(parents=True)
+            installed_js = b"window.__B2A_INSTALLED_ASSET__ = true;"
+            installed_css = b".installed-b2a-canary{display:block}"
+            self.assertNotEqual(installed_js, checkout_js)
+            (assets / "index.js").write_bytes(installed_js)
+            (assets / "style.css").write_bytes(installed_css)
+            with qa_dashboard_cdp.demo_server(fixture, installed_js, installed_css) as url:
+                origin = url.rsplit("/", 1)[0]
+                self.assertEqual(urllib.request.urlopen(origin + "/assets/index.js").read(), installed_js)
+                self.assertEqual(urllib.request.urlopen(origin + "/assets/style.css").read(), installed_css)
+
+    def test_fixture_server_keeps_validated_bytes_after_path_replacement(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = ROOT / "tests" / "fixtures" / "demo_snapshot_v1.json"
+            path = Path(temporary) / "index.js"
+            path.write_bytes(b"validated")
+            validated = path.read_bytes()
+            path.write_bytes(b"replacement")
+            with qa_dashboard_cdp.demo_server(fixture, validated, b"css") as url:
+                origin = url.rsplit("/", 1)[0]
+                self.assertEqual(urllib.request.urlopen(origin + "/assets/index.js").read(), b"validated")
+
+    @unittest.skipUnless(hasattr(os, "memfd_create"), "Linux memfd required")
+    def test_asset_memfd_is_sealed_and_read_once(self):
+        fd = qa_dashboard_cdp.create_sealed_memfd("test-asset", b"validated")
+        self.assertEqual(qa_dashboard_cdp.read_sealed_memfd(fd), b"validated")
+        with self.assertRaises(OSError):
+            os.fstat(fd)
     def test_release_version_is_consistent_across_metadata_assets_and_docs(self):
         manifest = json.loads((ROOT / "dashboard" / "manifest.json").read_text(encoding="utf-8"))
         plugin_text = (ROOT / "plugin.yaml").read_text(encoding="utf-8")
@@ -30,7 +623,7 @@ class DashboardAssetTests(unittest.TestCase):
         self.assertEqual(manifest["version"], version)
         self.assertEqual(project["version"], version)
         self.assertEqual(manifest["css"], f"dist/style.css?v={version}")
-        self.assertIn(f"Current release: `{version}`", readme)
+        self.assertIn(f"Source version: `{version}`", readme)
 
     def test_behavioral_cdp_harness_covers_product_invariants(self):
         qa = (ROOT / "scripts" / "qa_dashboard_cdp.py").read_text(encoding="utf-8")
@@ -358,6 +951,100 @@ class DashboardAssetTests(unittest.TestCase):
         chromium_which.assert_not_called()
         local_auth.assert_not_called()
         chromium_start.assert_not_called()
+
+    def test_cdp_harness_stops_only_its_recorded_chromium_group(self):
+        class ExitedLeader:
+            pid = 43210
+
+            @staticmethod
+            def poll():
+                return 0
+
+            @staticmethod
+            def wait(timeout=None):
+                return 0
+
+        process = ExitedLeader()
+        group_exists = True
+        signals = []
+
+        def killpg(pgid, sig):
+            nonlocal group_exists
+            self.assertEqual(pgid, process.pid)
+            if sig == 0:
+                if not group_exists:
+                    raise ProcessLookupError()
+                return
+            signals.append(sig)
+            if sig == qa_dashboard_cdp.signal.SIGKILL:
+                group_exists = False
+
+        with (
+            patch.object(qa_dashboard_cdp.os, "getpgrp", return_value=999),
+            patch.object(qa_dashboard_cdp.os, "killpg", side_effect=killpg),
+        ):
+            qa_dashboard_cdp.stop_owned_group(process, process.pid, timeout=0)
+
+        self.assertEqual(signals, [qa_dashboard_cdp.signal.SIGTERM, qa_dashboard_cdp.signal.SIGKILL])
+        with (
+            patch.object(qa_dashboard_cdp.os, "getpgrp", return_value=999),
+            patch.object(qa_dashboard_cdp.os, "killpg") as foreign_kill,
+            self.assertRaisesRegex(RuntimeError, "refusing"),
+        ):
+            qa_dashboard_cdp.stop_owned_group(process, process.pid + 1)
+        foreign_kill.assert_not_called()
+
+    def test_cdp_main_switches_real_popen_topology_only_for_internal_flag(self):
+        class Chromium:
+            pid = 43210
+            alive = True
+            def poll(self):
+                return None if self.alive else 0
+            def terminate(self):
+                self.alive = False
+            def kill(self):
+                self.alive = False
+            def wait(self, timeout=None):
+                self.alive = False
+                return 0
+
+        class FakeCDP:
+            events = []
+            def __init__(self, url):
+                self.url = url
+            def call(self, method, params=None):
+                return {}
+            def enable_egress_boundary(self, url, require_fixture_origin=True):
+                self.boundary = (url, require_fixture_origin)
+            def disable_egress_boundary(self):
+                self.disabled = True
+            def close(self):
+                pass
+
+        for inherit in (False, True):
+            with self.subTest(inherit=inherit), tempfile.TemporaryDirectory() as temporary:
+                process = Chromium()
+                argv = ["--url", "http:" + "//" + "127.0.0.1:8123/second-brain", "--output", temporary,
+                        "--chromium", "/bin/true", "--viewport", "390x844"]
+                if inherit:
+                    argv.append("--inherit-runner-process-group")
+                result = {"viewport": {"width": 390, "height": 844}, "checks": [],
+                          "metrics": {}, "probes": {}, "console_errors": [], "screenshot": "shot.png"}
+                with (
+                    patch.object(qa_dashboard_cdp.subprocess, "Popen", return_value=process) as popen,
+                    patch.object(qa_dashboard_cdp, "free_port", return_value=9222),
+                    patch.object(qa_dashboard_cdp, "get_json", return_value=[{"type": "page", "webSocketDebuggerUrl": "ws://test"}]),
+                    patch.object(qa_dashboard_cdp, "CDP", FakeCDP),
+                    patch.object(qa_dashboard_cdp, "local_auth_cookie", return_value=None),
+                    patch.object(qa_dashboard_cdp, "run_viewport", return_value=result),
+                    patch.object(qa_dashboard_cdp, "stop_owned_group") as stop_group,
+                ):
+                    self.assertEqual(qa_dashboard_cdp.main(argv), 0)
+                self.assertEqual(popen.call_args.kwargs["start_new_session"], not inherit)
+                if inherit:
+                    stop_group.assert_not_called()
+                else:
+                    stop_group.assert_called_once_with(process, process.pid)
 
     def test_cdp_harness_accepts_dashboard_session_header_without_logging_it(self):
         qa = (ROOT / "scripts" / "qa_dashboard_cdp.py").read_text(encoding="utf-8")

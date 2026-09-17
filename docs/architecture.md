@@ -55,4 +55,4 @@ The default renderer is a dependency-free accessible 2D Canvas view. The optiona
 
 ## Public release boundary
 
-The repository is pre-publication and has no archive-validation result until a separately authorized first commit exists. `scripts/check_public_release.py` scans only `git archive HEAD` and fails closed without a `HEAD`; it never treats a working-tree scan as equivalent. The scanner reports only `filename: category` and is intended to prevent environment artifacts, binary media, QA reports/screenshots, private paths, identity markers, and credential-shaped material from crossing the public boundary.
+`scripts/check_public_release.py` scans only `git archive HEAD`; it never treats a working-tree scan as equivalent. The scanner reports only `filename: category` and is intended to prevent environment artifacts, binary media, QA reports/screenshots, private paths, identity markers, and credential-shaped material from crossing the public boundary. A successful scan validates the exact committed archive but does not publish a tag, package, or GitHub Release.

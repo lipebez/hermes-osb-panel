@@ -15,17 +15,20 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.11"
 
       - name: Check JavaScript syntax
         run: node --check dashboard/dist/index.js
+
+      - name: Parse Python sources
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'import ast, pathlib; [ast.parse(pathlib.Path(path).read_text(encoding="utf-8"), filename=path) for path in ("__init__.py", "dashboard/plugin_api.py", "dashboard/snapshot_contract.py", "scripts/qa_dashboard_cdp.py", "scripts/qa_clean_install.py")]'
 
       - name: Run unit tests without bytecode
         run: PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests -v
@@ -35,3 +38,53 @@ jobs:
 
       - name: Check whitespace errors
         run: git diff --check
+
+  hermes-runtime-contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      HERMES_UPSTREAM_COMMIT: dfc28b61a0cfed58bcc200038c6bfec6f31adcd2
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Hermes in an isolated directory
+        env:
+          HOME: ${{ runner.temp }}/hermes-user
+          HERMES_HOME: ${{ runner.temp }}/hermes-home
+          HERMES_INSTALL_DIR: ${{ runner.temp }}/hermes-agent
+          HERMES_CLI: ${{ runner.temp }}/hermes-agent/venv/bin/hermes
+        run: |
+          curl --proto '=https' --tlsv1.2 -fsSL \
+            "https://raw.githubusercontent.com/NousResearch/hermes-agent/${HERMES_UPSTREAM_COMMIT}/scripts/install.sh" \
+            -o "${RUNNER_TEMP}/install-hermes.sh"
+          bash "${RUNNER_TEMP}/install-hermes.sh" \
+            --commit "${HERMES_UPSTREAM_COMMIT}" \
+            --force-commit \
+            --dir "${HERMES_INSTALL_DIR}" \
+            --hermes-home "${HERMES_HOME}" \
+            --skip-setup \
+            --skip-browser \
+            --skip-computer-use \
+            --no-skills \
+            --non-interactive
+          test "$(git -C "${HERMES_INSTALL_DIR}" rev-parse HEAD)" = "${HERMES_UPSTREAM_COMMIT}"
+          test -x "${HERMES_CLI}"
+
+      - name: Validate catalog admission contract
+        env:
+          HOME: ${{ runner.temp }}/hermes-user
+          HERMES_HOME: ${{ runner.temp }}/hermes-home
+          HERMES_INSTALL_DIR: ${{ runner.temp }}/hermes-agent
+          HERMES_CLI: ${{ runner.temp }}/hermes-agent/venv/bin/hermes
+        run: ${HERMES_CLI} plugins validate . --json
+
+      - name: Validate runtime plugin contracts
+        env:
+          HOME: ${{ runner.temp }}/hermes-user
+          HERMES_HOME: ${{ runner.temp }}/hermes-home
+          HERMES_INSTALL_DIR: ${{ runner.temp }}/hermes-agent
+          HERMES_CLI: ${{ runner.temp }}/hermes-agent/venv/bin/hermes
+        run: ${HERMES_CLI} plugins doctor . --ci

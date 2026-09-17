@@ -1,8 +1,8 @@
 # Hermes OSB Panel — independent community companion
 
-Hermes OSB Panel is a read-only dashboard companion for normalized Open Second Brain (OSB) snapshots in Hermes Agent. It is an independent community project by Filipe Bezerra (`@lipebez`): it is not an official Hermes Agent or Open Second Brain module and is not affiliated with, endorsed by, or maintained by either project.
+Hermes OSB Panel is a privacy-first, read-only dashboard companion for normalized Open Second Brain (OSB) snapshots in Hermes Agent. It is an independent community project by Filipe Bezerra (`@lipebez`): it is not an official Hermes Agent or Open Second Brain module and is not affiliated with, endorsed by, or maintained by either project.
 
-> **Source and package status.** Current release: `3.1.0` is **unreleased** package metadata: no package artifact, tag, or GitHub Release is published. Private staging validation, including its archive gate, has passed, but private staging is not a public release. The public source repository is https://github.com/lipebez/hermes-osb-panel; use the GitHub installation command below only after verifying the repository and commit. Source availability alone does not publish a package release.
+> **Source and package status.** Source version: `3.1.0`. Public tags and GitHub Releases, when available, are the authority for published artifacts. The public source repository is https://github.com/lipebez/hermes-osb-panel. Install only a full immutable commit SHA you have verified.
 
 ## What it does
 
@@ -15,30 +15,36 @@ It does **not** index, mutate, delete, reconfigure, or create another memory sto
 
 ## Compatibility and status
 
-The Hermes development/dashboard behavior was validated against **Hermes Agent v0.19.0 (2026.7.20)** in local fixture QA. One real Windows PowerShell clean-host installation from private staging also achieved plugin discovery, loaded `/second-brain` fail-closed with no local data, and completed disable/removal recovery. That staging result does not make a public-release claim or establish compatibility for other Hermes versions, hosts, or dashboard configurations.
+The narrow validated matrix is **Hermes Agent v0.21.3** at upstream commit `dfc28b61a0cfed58bcc200038c6bfec6f31adcd2` and **Open Second Brain v1.56.0** at observed commit `54bb28d9b760758446e494e3c6473f6534dfbdee`. Hermes validation covers the plugin admission/runtime contracts and local fixture QA. OSB validation covers the documented public data surfaces inspected at that exact checkout; it is not an end-to-end production adapter claim. No other Hermes or OSB version is claimed compatible.
 
-The companion owns the versioned snapshot contract `open-second-brain.dashboard.snapshot.v1`. The only OSB surface described here is the documented `o2b.metrics.v1` surface together with the documented graph-export context in [`docs/upstream-data-boundary.md`](docs/upstream-data-boundary.md). There is **no verified OSB release-version compatibility range** and no production OSB adapter. Missing data fails soft in the UI; it must not be filled by guessing or private-module access.
+The companion owns the versioned snapshot contract `open-second-brain.dashboard.snapshot.v1`. The only OSB surface described here is the documented `o2b.metrics.v1` surface together with the documented graph-export context in [`docs/upstream-data-boundary.md`](docs/upstream-data-boundary.md). There is no production OSB adapter. Missing data fails soft in the UI; it must not be filled by guessing or private-module access. A separate Windows PowerShell staging run verified discovery and disable/removal recovery, but it does not widen the exact compatibility matrix or replace the Linux-only clean-install harness.
 
 ## Prerequisites and authentication
 
-Before any future install, an operator needs:
+Before installation, an operator needs:
 
 1. a Hermes Agent installation with the dashboard available and access already protected by the host's dashboard authentication;
-2. permission to install a community plugin from GitHub after this repository has been published;
+2. permission to install an independent, non-official community plugin from GitHub;
 3. an OSB configuration **only** when using the strictly local prototype reader described below. No OSB installation or configuration is needed for the default fail-closed validation.
 
 The panel does not add its own authentication layer and must not be exposed as a substitute for host authentication. Its direct reader is for a single-user, direct-reader setup only; it does **not** provide multi-user, multi-profile, team, or tenant isolation.
 
 ## GitHub installation
 
-After verifying that the intended public repository is accessible, the expected Hermes CLI flow is:
+Hermes Agent v0.21.3 accepts a full 40-character commit SHA for `--ref`. Its parser and help at upstream commit `dfc28b61a0cfed58bcc200038c6bfec6f31adcd2` support the commands and flags below. Installing a custom source is opt-in: install it disabled, inspect the installed entry, run the runtime doctor against that installed plugin, and only then enable it:
 
 ```bash
-hermes plugins install lipebez/hermes-osb-panel --enable
+PLUGIN_SHA=<40-character-lowercase-commit-sha>
+hermes plugins install lipebez/hermes-osb-panel \
+  --ref "$PLUGIN_SHA" \
+  --no-enable
+hermes plugins list --user --json
+hermes plugins doctor hermes-osb-panel --ci
+hermes plugins enable hermes-osb-panel --no-allow-tool-override
 hermes dashboard --no-open
 ```
 
-These commands use the current Hermes CLI form `hermes plugins install <Git URL or owner/repo> --enable`. Private staging validation passed, but verify the public repository page and commit before installing from `lipebez/hermes-osb-panel`.
+Confirm that `plugins list --user --json` identifies `hermes-osb-panel` and that doctor exits successfully before enabling it. Do not substitute a branch or tag name for the SHA. If a public version tag is available, verify it in a trusted checkout, resolve it with `git rev-parse '<tag>^{commit}'`, compare the full result with the release evidence, and pass that SHA to `--ref`; Hermes v0.21.3 accepts only a full commit SHA there.
 
 To turn the plugin off later:
 
@@ -124,15 +130,7 @@ See [`docs/architecture.md`](docs/architecture.md) for the contract and threat b
 
 ## Local verification
 
-Run from the repository root:
-
-```bash
-node --check dashboard/dist/index.js
-PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests -v
-PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'import ast, pathlib; [ast.parse(pathlib.Path(path).read_text(encoding="utf-8"), filename=path) for path in ("__init__.py", "dashboard/plugin_api.py", "dashboard/snapshot_contract.py", "scripts/qa_dashboard_cdp.py")]'
-```
-
-The archive release scanner is deliberately different: after an explicitly authorized first public-release commit exists, run `PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/check_public_release.py`. It scans only `git archive HEAD` and fails closed when there is no `HEAD`; it must not be replaced with a working-tree scan. The private staging archive gate passed; that result does not publish this candidate or replace the post-publication gate.
+Use the single fail-fast exact-archive procedure in [`docs/qa.md`](docs/qa.md). Run it with exclusive operator control of the repository and QA directory. It verifies a clean candidate in a disposable detached worktree outside `/tmp`, creates one read-only `git archive` for its full SHA, and runs Node syntax, Python AST, the complete suite, public-release scanning, extraction-parity checks, the exact Hermes Doctor, and deterministic summary generation. The resulting `sanitized_operator_summary.v1` records operator-supplied candidate SHA, archive SHA-256, and gate results; it is not a signature or independent attestation. Its temporary `HOME`/`HERMES_HOME` keeps Doctor away from active profiles. A pass validates that commit only; it does not create or imply a tag or GitHub Release.
 
 ## Contributing and license
 

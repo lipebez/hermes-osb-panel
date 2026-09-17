@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
+import tempfile
 import unittest
 from fnmatch import fnmatchcase
 from pathlib import Path
@@ -253,6 +255,144 @@ class RepositorySafetyTests(unittest.TestCase):
                 start = text.index(heading)
                 positions = [text.index(command, start) for command in expected]
                 self.assertEqual(positions, sorted(positions))
+
+    def test_release_qa_is_fail_fast_and_binds_detached_worktree_and_one_exact_archive(self):
+        qa = (ROOT / "docs" / "qa.md").read_text(encoding="utf-8")
+
+        self.assertIn("set -euo pipefail", qa)
+        self.assertIn('QA_PARENT="$(dirname "$REPO_ROOT")"', qa)
+        self.assertIn('mktemp -d "$QA_PARENT/.hermes-osb-panel-release.XXXXXX"', qa)
+        self.assertIn('git -C "$REPO_ROOT" worktree add --detach "$QA_ROOT" "$CANDIDATE_SHA"', qa)
+        self.assertIn('git -C "$REPO_ROOT" worktree remove --force "$QA_ROOT"', qa)
+        self.assertNotIn('git -C "$REPO_ROOT" worktree prune', qa)
+        self.assertIn('set +e', qa)
+        self.assertIn('cleanup_status=0', qa)
+        self.assertIn('[[ ! -e "$QA_CONTAINER" ]] || cleanup_status=1', qa)
+        self.assertIn('[[ ! -e "$EVIDENCE_TMP_ROOT" ]] || cleanup_status=1', qa)
+        self.assertIn('status=$?', qa)
+        self.assertIn('exit "$status"', qa)
+        self.assertLess(qa.index("trap cleanup EXIT"), qa.index("EVIDENCE_TMP_ROOT=\"$(mktemp"))
+        self.assertLess(qa.index("trap cleanup EXIT"), qa.index("QA_CONTAINER=\"$(mktemp"))
+
+        candidate = qa.index('CANDIDATE_SHA="$(git rev-parse HEAD)"')
+        worktree = qa.index('worktree add --detach "$QA_ROOT" "$CANDIDATE_SHA"', candidate)
+        archive = qa.index('git archive --format=tar "$CANDIDATE_SHA"', worktree)
+        digest = qa.index('CANDIDATE_ARCHIVE_SHA256="$(sha256sum', archive)
+        readonly = qa.index('chmod 0444 "$CANDIDATE_ARCHIVE"', digest)
+        node = qa.index('cd "$QA_ROOT" && node --check dashboard/dist/index.js', readonly)
+        tracked_python = qa.index("git -C \"$QA_ROOT\" ls-files -z -- '*.py'", node)
+        ast_gate = qa.index('python3 -B - "$QA_ROOT" "${TRACKED_PYTHON[@]}"', tracked_python)
+        suite = qa.index("unittest discover", ast_gate)
+        scanner = qa.index('check_public_release.py" --archive "$CANDIDATE_ARCHIVE"', suite)
+        extraction = qa.index('tar -xf "$CANDIDATE_ARCHIVE" -C "$ARCHIVE_ROOT"', scanner)
+        parity_before = qa.index("\nassert_archive_parity\n", extraction)
+        doctor = qa.index('plugins doctor "$ARCHIVE_ROOT" --ci', parity_before)
+        parity_after = qa.index("\nassert_archive_parity\n", doctor)
+        evidence = qa.index("build_release_evidence.py", parity_after)
+        self.assertEqual(
+            [candidate, worktree, archive, digest, readonly, node, tracked_python, ast_gate, suite, scanner, extraction, parity_before, doctor, parity_after, evidence],
+            sorted([candidate, worktree, archive, digest, readonly, node, tracked_python, ast_gate, suite, scanner, extraction, parity_before, doctor, parity_after, evidence]),
+        )
+
+        self.assertEqual(qa.count('git archive --format=tar "$CANDIDATE_SHA"'), 1)
+        self.assertGreaterEqual(qa.count("\nassert_candidate_worktree\n"), 6)
+        for command in (
+            'git -C "$QA_ROOT" rev-parse HEAD',
+            'git -C "$QA_ROOT" status --porcelain=v1 --untracked-files=normal',
+            'git -C "$QA_ROOT" diff --quiet "$CANDIDATE_SHA" --',
+            'git -C "$QA_ROOT" diff --cached --quiet',
+        ):
+            self.assertIn(command, qa)
+        self.assertGreaterEqual(qa.count("\nassert_archive_digest\n"), 7)
+        self.assertIn('test "$(stat -c \'%a\' "$CANDIDATE_ARCHIVE")" = 444', qa)
+        self.assertIn('test "$(stat -c \'%h\' "$CANDIDATE_ARCHIVE")" = 1', qa)
+        self.assertIn('test "$(stat -c \'%s\' "$CANDIDATE_ARCHIVE")" -le "$MAX_ARCHIVE_BYTES"', qa)
+        self.assertIn('tar --compare --file "$CANDIDATE_ARCHIVE" --directory "$ARCHIVE_ROOT"', qa)
+        self.assertIn('check_archive_parity.py" --archive "$CANDIDATE_ARCHIVE" --root "$ARCHIVE_ROOT"', qa)
+        validation = qa.index('check_archive_parity.py" \\\n  --archive "$CANDIDATE_ARCHIVE"')
+        extraction = qa.index('tar -xf "$CANDIDATE_ARCHIVE" -C "$ARCHIVE_ROOT"')
+        self.assertLess(validation, extraction)
+        self.assertIn("sanitized_operator_summary.v1", qa)
+        self.assertIn("not a signature or independent attestation", qa)
+        self.assertIn('--candidate-archive-sha256 "$CANDIDATE_ARCHIVE_SHA256"', qa)
+        self.assertIn('--doctor-gate-passed "$DOCTOR_GATE_PASSED"', qa)
+        self.assertIn('DOCTOR_GATE_PASSED=true', qa)
+        self.assertIn('TESTS_FAILED=0  # reached only after the suite pipeline succeeded', qa)
+        self.assertIn('--tests-failed "$TESTS_FAILED"', qa)
+        self.assertNotIn("--tests-failed 0", qa)
+        self.assertIn(r'^Ran (\d+) tests?$', qa)
+        self.assertNotIn("matches[-1]", qa)
+
+    def test_release_qa_trap_cleans_directory_when_first_mktemp_returns_error(self):
+        qa = (ROOT / "docs" / "qa.md").read_text(encoding="utf-8")
+        segment = qa[qa.index('QA_CONTAINER=""'):qa.index('QA_ROOT="$QA_CONTAINER/candidate-worktree"')]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            fake_mktemp = fake_bin / "mktemp"
+            fake_mktemp.write_text(
+                "#!/bin/bash\npath=\"${2%.XXXXXX}.probe\"\nmkdir -p -- \"$path\"\nprintf '%s\\n' \"$path\"\nexit 9\n",
+                encoding="utf-8",
+            )
+            fake_mktemp.chmod(0o755)
+            probe = root / ".hermes-osb-panel-release.probe"
+            script = f'set -euo pipefail\nREPO_ROOT={str(ROOT)!r}\nQA_PARENT={str(root)!r}\n' + segment
+            result = subprocess.run(
+                ["bash", "-c", script],
+                env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 9, result.stderr)
+            self.assertFalse(probe.exists())
+
+    def test_readme_uses_opt_in_install_doctor_enable_sequence(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        commands = (
+            "plugins install lipebez/hermes-osb-panel",
+            "--no-enable",
+            "plugins list --user --json",
+            "plugins doctor hermes-osb-panel --ci",
+            "plugins enable hermes-osb-panel --no-allow-tool-override",
+            "dashboard --no-open",
+        )
+        positions = [readme.index(command) for command in commands]
+        self.assertEqual(positions, sorted(positions))
+        self.assertNotIn("Current release", readme)
+
+    def test_ci_actions_are_pinned_to_full_commit_shas(self):
+        ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        uses = re.findall(r"(?m)^\s*uses:\s*(actions/(?:checkout|setup-python))@([^\s#]+)", ci)
+
+        self.assertEqual(len(uses), 3)
+        for action, revision in uses:
+            with self.subTest(action=action):
+                self.assertRegex(revision, r"^[0-9a-f]{40}$")
+
+    def test_ci_uses_runner_context_only_after_job_dispatch(self):
+        ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        job_start = ci.index("  hermes-runtime-contracts:")
+        steps_start = ci.index("    steps:", job_start)
+        job_header = ci[job_start:steps_start]
+
+        self.assertNotIn("${{ runner.", job_header)
+        self.assertGreaterEqual(ci[steps_start:].count("${{ runner.temp }}"), 3)
+
+    def test_docs_describe_redirect_and_release_state_without_stale_claims(self):
+        qa = (ROOT / "docs" / "qa.md").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
+        changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+
+        self.assertIn("forwards same-origin 3xx responses", qa)
+        self.assertIn("subsequent destination", qa)
+        self.assertNotIn("The proxy rejects CONNECT, non-exact origins, redirects", qa)
+        for text in (qa, readme, security, changelog):
+            self.assertNotIn("documentation freeze", text)
+            self.assertNotIn("no `v3.1.0` tag", text)
+        self.assertNotIn("Current release", readme)
 
 
 if __name__ == "__main__":

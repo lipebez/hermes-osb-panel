@@ -14,6 +14,10 @@ ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / "dashboard" / "plugin_api.py"
 
 
+def _candidate_bytecode_artifacts():
+    return frozenset(ROOT.rglob("__pycache__/*.pyc"))
+
+
 def _load_plugin_api():
     spec = importlib.util.spec_from_file_location("plugin_api", MODULE_PATH)
     mod = importlib.util.module_from_spec(spec)
@@ -45,18 +49,33 @@ print('HOST_IMPORT_OK')
         self.assertEqual(completed.stdout.strip(), "HOST_IMPORT_OK")
 
     def test_host_import_subprocess_leaves_no_bytecode_in_candidate(self):
+        before = _candidate_bytecode_artifacts()
         completed = subprocess.run(
             [sys.executable, "-B", "-I", "-c", "import sys; print('BYTECODE_GUARD_OK')"],
             cwd=ROOT.parent,
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
             check=False,
             capture_output=True,
             text=True,
         )
+        after = _candidate_bytecode_artifacts()
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(completed.stdout.strip(), "BYTECODE_GUARD_OK")
-        self.assertEqual(list(ROOT.rglob("__pycache__")), [])
-        self.assertEqual(list(ROOT.rglob("*.pyc")), [])
+        self.assertEqual(after - before, frozenset())
+
+    def test_bytecode_guard_ignores_preexisting_artifact(self):
+        cache_dir = ROOT / "tests" / "__pycache__"
+        cache_existed = cache_dir.exists()
+        artifact = cache_dir / "preexisting-regression.pyc"
+        cache_dir.mkdir(exist_ok=True)
+        artifact.write_bytes(b"preexisting regression fixture")
+        try:
+            self.test_host_import_subprocess_leaves_no_bytecode_in_candidate()
+        finally:
+            artifact.unlink(missing_ok=True)
+            if not cache_existed:
+                cache_dir.rmdir()
 
     def test_default_snapshot_is_disabled_and_discloses_no_local_data(self):
         mod = _load_plugin_api()

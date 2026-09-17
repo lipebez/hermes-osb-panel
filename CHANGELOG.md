@@ -2,7 +2,7 @@
 
 All notable changes to Hermes OSB Panel will be documented in this file.
 
-## Unreleased
+## 3.1.0 - 2026-09-17
 
 ### Changed
 
@@ -23,13 +23,11 @@ All notable changes to Hermes OSB Panel will be documented in this file.
 - Documented the single-user/direct-reader threat boundary and the prohibition on claiming multi-user isolation.
 - Documented demo-fixture-only public artifacts, no panel-originated third-party egress, and archive-only release scanning.
 - Hardened authenticated CDP QA: the harness rejects non-loopback `--url` values before it can read or attach dashboard authentication material.
+- Added a browser-global exact-origin proxy for fixture Chromium runs, with CDP request interception and browser-API blocking retained as defense in depth. This is a QA egress boundary, not an operating-system sandbox.
 
 ### Compatibility notes
 
-- Hermes development/dashboard behavior was validated in local fixture QA against Hermes Agent v0.19.0 (2026.7.20), plus one Windows PowerShell clean-host private-staging installation test.
-- The private-staging archive gate passed. The public source repository at `lipebez/hermes-osb-panel` does not by itself publish a package, tag, or GitHub Release.
-- No OSB release-version compatibility range or production OSB adapter has been verified.
-
-## Package metadata 3.1.0 (pre-publication)
-
-`3.1.0` is current package metadata in the local public-release candidate. No public version has been published or released.
+- Validated the plugin admission/runtime contracts and local fixture behavior against Hermes Agent v0.21.3 at exact upstream commit `dfc28b61a0cfed58bcc200038c6bfec6f31adcd2`.
+- Inspected the documented OSB public-data boundary against Open Second Brain v1.56.0 at observed commit `54bb28d9b760758446e494e3c6473f6534dfbdee`. This does not claim a production adapter or compatibility with other OSB versions.
+- Retained the separate Windows PowerShell staging result for discovery and disable/removal recovery without treating it as a broad compatibility claim or as execution of the Linux-only clean-install harness.
+- Source metadata identifies version 3.1.0. Public tags and GitHub Releases, when available, are the authority for published artifacts; this changelog does not imply that one exists.
