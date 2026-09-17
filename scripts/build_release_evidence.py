@@ -10,14 +10,16 @@ from __future__ import annotations
 import argparse
 import json
 import re
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Sequence
 
 
+_NUMERIC_IDENTIFIER = r"(?:0|[1-9][0-9]*)"
+_PRERELEASE_IDENTIFIER = rf"(?:{_NUMERIC_IDENTIFIER}|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
 _VERSION = re.compile(
-    r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
-    r"(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?"
-    r"(?:\+[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?"
+    rf"{_NUMERIC_IDENTIFIER}\.{_NUMERIC_IDENTIFIER}\.{_NUMERIC_IDENTIFIER}"
+    rf"(?:-{_PRERELEASE_IDENTIFIER}(?:\.{_PRERELEASE_IDENTIFIER})*)?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
 )
 _SHA = re.compile(r"[0-9a-f]{40}")
 
@@ -108,10 +110,20 @@ def _boolean(value: str) -> bool:
 
 
 def _output_path(value: str) -> Path:
-    pure = PurePosixPath(value)
-    if not pure.is_absolute() or len(pure.parts) < 3 or pure.parts[1] != "tmp" or ".." in pure.parts:
+    output = Path(value)
+    if not output.is_absolute() or output.is_symlink():
         raise ValueError("output must be an absolute path below /tmp")
-    return Path(value)
+
+    try:
+        temporary_root = Path("/tmp").resolve(strict=True)
+        resolved_output = output.resolve(strict=False)
+        resolved_output.relative_to(temporary_root)
+    except (OSError, RuntimeError, ValueError):
+        raise ValueError("output must be an absolute path below /tmp") from None
+
+    if resolved_output == temporary_root:
+        raise ValueError("output must be an absolute path below /tmp")
+    return resolved_output
 
 
 def _parser() -> argparse.ArgumentParser:

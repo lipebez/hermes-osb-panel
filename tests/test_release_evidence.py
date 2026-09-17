@@ -30,6 +30,24 @@ def safe_inputs() -> dict[str, object]:
     }
 
 
+def cli_args(output: Path) -> list[str]:
+    return [
+        "--project-version", "3.1.0",
+        "--candidate-sha", SHA,
+        "--tested-hermes-version", "0.21.3",
+        "--tested-hermes-ref", HERMES_SHA,
+        "--tested-osb-version", "1.4.2",
+        "--tested-osb-ref", OSB_SHA,
+        "--static-gate-passed", "true",
+        "--unit-gate-passed", "true",
+        "--archive-gate-passed", "true",
+        "--tests-run", "72",
+        "--tests-passed", "72",
+        "--tests-failed", "0",
+        "--output", str(output),
+    ]
+
+
 class ReleaseEvidenceTests(unittest.TestCase):
     def test_builds_the_exact_safe_summary(self):
         evidence = build_evidence(**safe_inputs())
@@ -99,6 +117,45 @@ class ReleaseEvidenceTests(unittest.TestCase):
                     build_evidence(**values)
                 self.assertNotIn(unsafe, str(caught.exception))
 
+    def test_accepts_semver_2_prerelease_and_build_boundaries(self):
+        versions = (
+            "0.0.0",
+            "1.2.3-alpha",
+            "1.2.3-alpha.1",
+            "1.2.3-0.3.7",
+            "1.2.3-x.7.z.92",
+            "1.2.3-x-y-z.--",
+            "1.2.3+001",
+            "1.2.3-beta+exp.sha.5114f85",
+        )
+
+        for version in versions:
+            with self.subTest(version=version):
+                values = safe_inputs()
+                values["project_version"] = version
+                self.assertEqual(build_evidence(**values)["project_version"], version)
+
+    def test_rejects_non_semver_and_zero_padded_numeric_prerelease_identifiers(self):
+        versions = (
+            "01.2.3",
+            "1.02.3",
+            "1.2.03",
+            "1.2.3-01",
+            "1.2.3-alpha.01",
+            "1.2.3-",
+            "1.2.3-alpha.",
+            "1.2.3+build.",
+            "v1.2.3",
+            "1.2.3 alpha",
+        )
+
+        for version in versions:
+            with self.subTest(version=version):
+                values = safe_inputs()
+                values["project_version"] = version
+                with self.assertRaises(ValueError):
+                    build_evidence(**values)
+
     def test_rejects_inconsistent_or_boolean_test_counts(self):
         for field, value in (("tests_run", True), ("tests_passed", -1), ("tests_failed", 73)):
             with self.subTest(field=field, value=value):
@@ -127,24 +184,34 @@ class ReleaseEvidenceTests(unittest.TestCase):
         with TemporaryDirectory(dir="/tmp") as temp_dir:
             first = Path(temp_dir) / "first.json"
             second = Path(temp_dir) / "second.json"
-            common = [
-                "--project-version", "3.1.0",
-                "--candidate-sha", SHA,
-                "--tested-hermes-version", "0.21.3",
-                "--tested-hermes-ref", HERMES_SHA,
-                "--tested-osb-version", "1.4.2",
-                "--tested-osb-ref", OSB_SHA,
-                "--static-gate-passed", "true",
-                "--unit-gate-passed", "true",
-                "--archive-gate-passed", "true",
-                "--tests-run", "72",
-                "--tests-passed", "72",
-                "--tests-failed", "0",
-            ]
 
-            self.assertEqual(main([*common, "--output", str(first)]), 0)
-            self.assertEqual(main([*common, "--output", str(second)]), 0)
+            self.assertEqual(main(cli_args(first)), 0)
+            self.assertEqual(main(cli_args(second)), 0)
             self.assertEqual(first.read_bytes(), second.read_bytes())
+
+    def test_cli_rejects_existing_output_symlink_before_write(self):
+        with TemporaryDirectory(dir="/tmp") as temp_dir:
+            directory = Path(temp_dir)
+            target = directory / "target.json"
+            target.write_text("unchanged", encoding="utf-8")
+            output = directory / "output.json"
+            output.symlink_to(target)
+
+            with self.assertRaises(ValueError):
+                main(cli_args(output))
+
+            self.assertEqual(target.read_text(encoding="utf-8"), "unchanged")
+
+    def test_cli_rejects_symlinked_parent_that_escapes_tmp_before_write(self):
+        with TemporaryDirectory(dir="/tmp") as temp_dir, TemporaryDirectory(dir="/") as outside_dir:
+            linked_parent = Path(temp_dir) / "linked-parent"
+            linked_parent.symlink_to(outside_dir, target_is_directory=True)
+            escaped_output = Path(outside_dir) / "evidence.json"
+
+            with self.assertRaises(ValueError):
+                main(cli_args(linked_parent / "evidence.json"))
+
+            self.assertFalse(escaped_output.exists())
 
     def test_cli_rejects_output_outside_tmp(self):
         with self.assertRaises(ValueError) as caught:
