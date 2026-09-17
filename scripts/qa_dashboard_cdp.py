@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import fcntl
 import json
 import math
 import os
@@ -29,6 +30,9 @@ from typing import Any
 
 DEFAULT_VIEWPORTS = [(1440, 900), (1280, 577), (1024, 768), (390, 844)]
 ROOT = Path(__file__).resolve().parents[1]
+F_ADD_SEALS = getattr(fcntl, "F_ADD_SEALS", 1033)
+F_GET_SEALS = getattr(fcntl, "F_GET_SEALS", 1034)
+REQUIRED_MEMFD_SEALS = 0x01 | 0x02 | 0x04 | 0x08
 
 try:
     from dashboard.snapshot_contract import sanitize_report_payload
@@ -73,27 +77,46 @@ def parse_loopback_url(value: str) -> str:
     return value
 
 
-def parse_asset_root(value: str) -> Path:
-    """Accept only a real, non-symlink dist directory with both fixture assets."""
-    path = Path(value)
-    if not path.is_absolute():
-        raise argparse.ArgumentTypeError("asset root must be absolute")
+def create_sealed_memfd(name: str, payload: bytes) -> int:
+    """Create an immutable anonymous file positioned for an inheriting reader."""
+    descriptor = os.memfd_create(name, os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
     try:
-        if stat.S_ISLNK(path.lstat().st_mode):
-            raise argparse.ArgumentTypeError("asset root must not be a symlink")
-        resolved = path.resolve(strict=True)
-        if resolved != path.absolute() or not resolved.is_dir():
-            raise argparse.ArgumentTypeError("asset root must be a canonical directory")
-        for name in ("index.js", "style.css"):
-            asset = resolved / name
-            mode = asset.lstat().st_mode
-            if stat.S_ISLNK(mode) or not stat.S_ISREG(mode) or asset.resolve(strict=True).parent != resolved:
-                raise argparse.ArgumentTypeError("asset root contains an invalid dashboard asset")
-    except argparse.ArgumentTypeError:
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("short memfd write")
+            view = view[written:]
+        fcntl.fcntl(descriptor, F_ADD_SEALS, REQUIRED_MEMFD_SEALS)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
         raise
-    except (OSError, RuntimeError) as exc:
-        raise argparse.ArgumentTypeError("asset root or required dashboard asset is missing") from exc
-    return resolved
+
+
+def read_sealed_memfd(descriptor: int) -> bytes:
+    """Consume and close a fully sealed regular memfd."""
+    try:
+        status = os.fstat(descriptor)
+        if not stat.S_ISREG(status.st_mode) or status.st_nlink != 0:
+            raise RuntimeError("asset descriptor was not an anonymous regular file")
+        if fcntl.fcntl(descriptor, F_GET_SEALS) & REQUIRED_MEMFD_SEALS != REQUIRED_MEMFD_SEALS:
+            raise RuntimeError("asset descriptor was not fully sealed")
+        if status.st_size > 1_000_000:
+            raise RuntimeError("asset descriptor exceeded the QA size limit")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        chunks: list[bytes] = []
+        remaining = status.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(65536, remaining))
+            if not chunk:
+                raise RuntimeError("asset descriptor ended before its declared size")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
 
 
 def free_port() -> int:
@@ -162,12 +185,10 @@ def stop_inherited_process(process: Any, timeout: float = 6.0) -> None:
 
 
 @contextmanager
-def demo_server(fixture: Path, asset_root: Path):
-    """Serve explicit installed assets and one synthetic fixture."""
+def demo_server(fixture: Path, javascript: bytes, stylesheet: bytes):
+    """Serve already-validated immutable asset bytes and one synthetic fixture."""
 
     payload = fixture.read_bytes()
-    javascript = (asset_root / "index.js").read_bytes()
-    stylesheet = (asset_root / "style.css").read_bytes()
     html = b"""<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><link rel='stylesheet' href='/assets/style.css'><style>html,body,#root,#root>div,main,main>div,main>div>div,#pluginPageContainer{height:100%;min-height:0;margin:0;overflow:hidden;display:flex;flex-direction:column}</style></head><body><div id='root'><div><header role='banner'>Host</header><main><div><div><div id='pluginPageContainer'></div></div></div></main></div></div><script src='/assets/index.js'></script></body></html>"""
 
     class Handler(BaseHTTPRequestHandler):
@@ -920,23 +941,29 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--url", required=True, type=parse_loopback_url)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--fixture", type=Path, help="serve this sanitized fixture with explicit installed assets")
-    parser.add_argument("--asset-root", type=parse_asset_root, help="validated dist root used with --fixture")
+    parser.add_argument("--asset-js-fd", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--asset-css-fd", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--chromium", type=Path, help="pre-resolved Chromium executable")
     parser.add_argument("--inherit-runner-process-group", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--viewport", dest="viewports", action="append", type=parse_viewport, help="repeatable WIDTHxHEIGHT; defaults to 1440x900, 1024x768 and 390x844")
     args = parser.parse_args(argv)
-    if args.fixture and args.asset_root is None:
-        parser.error("--fixture requires --asset-root; checkout asset fallback is forbidden")
-    if args.asset_root is not None and not args.fixture:
-        parser.error("--asset-root requires --fixture")
+    asset_fds = (args.asset_js_fd, args.asset_css_fd)
+    if args.fixture and any(value is None or value < 0 for value in asset_fds):
+        parser.error("--fixture requires inherited sealed asset descriptors")
+    if not args.fixture and any(value is not None for value in asset_fds):
+        parser.error("asset descriptors require --fixture")
     viewports = args.viewports or DEFAULT_VIEWPORTS
     args.output.mkdir(parents=True, exist_ok=True)
     chromium = str(args.chromium.resolve()) if args.chromium else (shutil.which("chromium") or shutil.which("chromium-browser"))
     if not chromium:
         raise SystemExit("Chromium not found; refusing to install a heavy dependency")
 
-    asset_root: Path | None = args.asset_root
-    demo_context = demo_server(args.fixture, asset_root) if args.fixture and asset_root is not None else None
+    if args.fixture:
+        javascript = read_sealed_memfd(args.asset_js_fd)
+        stylesheet = read_sealed_memfd(args.asset_css_fd)
+        demo_context = demo_server(args.fixture, javascript, stylesheet)
+    else:
+        demo_context = None
     run_url = demo_context.__enter__() if demo_context else args.url
     port = free_port()
     runner_pgid = os.getpgrp()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import re
@@ -37,6 +38,8 @@ DASHBOARD_POLL_INTERVAL = 0.1
 MAX_TRANSIENT_FETCH_FAILURES = 50
 MAX_PORT_ATTEMPTS = 3
 SAFE_PATH = "/usr/bin:/bin"
+F_ADD_SEALS = getattr(fcntl, "F_ADD_SEALS", 1033)
+REQUIRED_MEMFD_SEALS = 0x01 | 0x02 | 0x04 | 0x08
 _REPO_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,99})/[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,99})\Z")
 _SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
 _SOCKET_INODE_RE = re.compile(r"socket:\[([1-9][0-9]*)\]\Z")
@@ -444,96 +447,182 @@ def _plugin_entry(payload: Any) -> dict[str, Any] | None:
     return None
 
 
-def _owned_install_path(hermes_home: Path, relative: Path, *, directory: bool) -> Path:
-    """Resolve an installed path without accepting symlinks or HOME escape."""
-    if relative.is_absolute() or not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
-        raise QAFailure("installed plugin path was invalid")
-    try:
-        home = hermes_home.resolve(strict=True)
-        if stat.S_ISLNK(hermes_home.lstat().st_mode):
-            raise QAFailure("temporary HERMES_HOME must not be a symlink")
-        current = hermes_home
-        for part in relative.parts:
-            current = current / part
-            mode = current.lstat().st_mode
-            if stat.S_ISLNK(mode):
-                raise QAFailure("installed plugin path contained a symlink")
-        resolved = current.resolve(strict=True)
-        resolved.relative_to(home)
-    except QAFailure:
-        raise
-    except (OSError, RuntimeError, ValueError) as exc:
-        raise QAFailure("installed plugin path was missing or escaped HERMES_HOME") from exc
-    mode = resolved.stat().st_mode
-    if (directory and not stat.S_ISDIR(mode)) or (not directory and not stat.S_ISREG(mode)):
+def _check_opened_fd(descriptor: int, *, directory: bool) -> os.stat_result:
+    status = os.fstat(descriptor)
+    mode = status.st_mode
+    expected_type = stat.S_ISDIR(mode) if directory else stat.S_ISREG(mode)
+    if not expected_type:
         raise QAFailure("installed plugin path had an unexpected type")
-    return resolved
+    if status.st_uid != os.geteuid() or mode & 0o022:
+        raise QAFailure("installed plugin path had unsafe permissions")
+    if directory:
+        if mode & 0o500 != 0o500:
+            raise QAFailure("installed plugin directory was not owner-readable and searchable")
+    elif status.st_nlink != 1 or mode & 0o7000 or not mode & stat.S_IRUSR:
+        raise QAFailure("installed plugin file had unsafe identity or permissions")
+    return status
 
 
-def _installed_asset_root(hermes_home: Path, repository: str, ref: str) -> Path:
-    """Derive and validate the pinned plugin's dist root from Hermes metadata."""
-    metadata_path = _owned_install_path(
-        hermes_home, Path("plugins") / ".install-metadata.json", directory=False,
-    )
+def _read_fd(descriptor: int, limit: int) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = os.read(descriptor, min(65536, limit + 1 - total))
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > limit:
+            raise QAFailure("installed plugin file exceeded the QA size limit")
+
+
+def _read_installed_assets(
+    hermes_home: Path, repository: str, ref: str, *,
+    _after_open: Callable[[str], None] | None = None,
+) -> dict[str, bytes]:
+    """Read the install once through an O_NOFOLLOW descriptor tree."""
+    after_open = _after_open or (lambda _label: None)
+    directory_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
+    file_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+    opened: list[int] = []
+
+    def open_component(parent: int | None, name: str | Path, label: str, *, directory: bool) -> int:
+        flags = directory_flags if directory else file_flags
+        try:
+            descriptor = os.open(name, flags) if parent is None else os.open(name, flags, dir_fd=parent)
+            opened.append(descriptor)
+            _check_opened_fd(descriptor, directory=directory)
+            after_open(label)
+            return descriptor
+        except QAFailure:
+            raise
+        except OSError as exc:
+            raise QAFailure("installed plugin path was missing, linked, or unsafe") from exc
+
     try:
-        if metadata_path.stat().st_size > MAX_STATUS_RESPONSE_BYTES:
-            raise QAFailure("plugin install metadata exceeded the QA size limit")
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    except QAFailure:
-        raise
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise QAFailure("plugin install metadata was invalid") from exc
-    expected_source = f"https://github.com/{repository}.git"
-    record = metadata.get(PLUGIN_ID) if isinstance(metadata, dict) else None
-    if not isinstance(record, dict) or record != {
-        "pinned": True, "revision": ref, "source": expected_source,
-    }:
-        raise QAFailure("plugin install metadata did not prove the requested pin")
-
-    plugin_root = _owned_install_path(hermes_home, Path("plugins") / PLUGIN_ID, directory=True)
-    plugin_manifest = _owned_install_path(
-        hermes_home, Path("plugins") / PLUGIN_ID / "plugin.yaml", directory=False,
-    )
-    try:
-        manifest_text = plugin_manifest.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
-        raise QAFailure("installed plugin manifest was invalid") from exc
-    names = re.findall(r"(?m)^name:\s*['\"]?([^'\"\s#]+)['\"]?\s*(?:#.*)?$", manifest_text)
-    if names != [PLUGIN_ID]:
-        raise QAFailure("installed plugin manifest identity did not match")
-
-    dashboard_manifest = _owned_install_path(
-        hermes_home, Path("plugins") / PLUGIN_ID / "dashboard" / "manifest.json", directory=False,
-    )
-    try:
-        if dashboard_manifest.stat().st_size > MAX_STATUS_RESPONSE_BYTES:
-            raise QAFailure("dashboard manifest exceeded the QA size limit")
-        dashboard = json.loads(dashboard_manifest.read_text(encoding="utf-8"))
-    except QAFailure:
-        raise
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise QAFailure("installed dashboard manifest was invalid") from exc
-    if not isinstance(dashboard, dict) or dashboard.get("name") != PLUGIN_ID:
-        raise QAFailure("installed dashboard manifest identity did not match")
-    entry = dashboard.get("entry")
-    css = dashboard.get("css")
-    css_path = css.split("?", 1)[0] if isinstance(css, str) else None
-    if entry != "dist/index.js" or css_path != "dist/style.css":
-        raise QAFailure("installed dashboard manifest assets were unexpected")
-
-    asset_root = _owned_install_path(
-        hermes_home, Path("plugins") / PLUGIN_ID / "dashboard" / "dist", directory=True,
-    )
-    for name in ("index.js", "style.css"):
-        asset = _owned_install_path(
-            hermes_home, Path("plugins") / PLUGIN_ID / "dashboard" / "dist" / name,
-            directory=False,
+        home_fd = open_component(None, hermes_home, "HERMES_HOME", directory=True)
+        plugins_fd = open_component(home_fd, "plugins", "plugins", directory=True)
+        metadata_fd = open_component(
+            plugins_fd, ".install-metadata.json", "plugins/.install-metadata.json", directory=False,
         )
-        if asset.parent != asset_root:
-            raise QAFailure("installed dashboard asset escaped its dist root")
-    if plugin_root not in asset_root.parents:
-        raise QAFailure("installed dashboard assets escaped the plugin root")
-    return asset_root
+        try:
+            metadata = json.loads(_read_fd(metadata_fd, MAX_STATUS_RESPONSE_BYTES).decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise QAFailure("plugin install metadata was invalid") from exc
+        record = metadata.get(PLUGIN_ID) if isinstance(metadata, dict) else None
+        if record != {
+            "pinned": True, "revision": ref, "source": f"https://github.com/{repository}.git",
+        }:
+            raise QAFailure("plugin install metadata did not match the requested pin")
+
+        plugin_fd = open_component(plugins_fd, PLUGIN_ID, f"plugins/{PLUGIN_ID}", directory=True)
+        plugin_manifest_fd = open_component(
+            plugin_fd, "plugin.yaml", f"plugins/{PLUGIN_ID}/plugin.yaml", directory=False,
+        )
+        try:
+            manifest_text = _read_fd(plugin_manifest_fd, MAX_STATUS_RESPONSE_BYTES).decode("utf-8")
+        except UnicodeError as exc:
+            raise QAFailure("installed plugin manifest was invalid") from exc
+        names = re.findall(r"(?m)^name:\s*['\"]?([^'\"\s#]+)['\"]?\s*(?:#.*)?$", manifest_text)
+        if names != [PLUGIN_ID]:
+            raise QAFailure("installed plugin manifest identity did not match")
+
+        dashboard_fd = open_component(
+            plugin_fd, "dashboard", f"plugins/{PLUGIN_ID}/dashboard", directory=True,
+        )
+        dashboard_manifest_fd = open_component(
+            dashboard_fd, "manifest.json", f"plugins/{PLUGIN_ID}/dashboard/manifest.json", directory=False,
+        )
+        try:
+            dashboard = json.loads(_read_fd(dashboard_manifest_fd, MAX_STATUS_RESPONSE_BYTES).decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise QAFailure("installed dashboard manifest was invalid") from exc
+        css = dashboard.get("css") if isinstance(dashboard, dict) else None
+        if (
+            not isinstance(dashboard, dict) or dashboard.get("name") != PLUGIN_ID
+            or dashboard.get("entry") != "dist/index.js"
+            or not isinstance(css, str) or css.split("?", 1)[0] != "dist/style.css"
+        ):
+            raise QAFailure("installed dashboard manifest assets were unexpected")
+
+        dist_label = f"plugins/{PLUGIN_ID}/dashboard/dist"
+        dist_fd = open_component(dashboard_fd, "dist", dist_label, directory=True)
+        assets: dict[str, bytes] = {}
+        for name in ("index.js", "style.css"):
+            asset_fd = open_component(dist_fd, name, f"{dist_label}/{name}", directory=False)
+            assets[name] = _read_fd(asset_fd, MAX_RESPONSE_BYTES)
+        return assets
+    finally:
+        for descriptor in reversed(opened):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def _git_output(arguments: Sequence[str]) -> bytes:
+    git = shutil.which("git", path=SAFE_PATH)
+    if not git:
+        raise QAFailure("git was unavailable for commit blob verification")
+    with tempfile.TemporaryFile() as output:
+        try:
+            result = subprocess.run(
+                [git, "-C", str(ROOT), *arguments], stdin=subprocess.DEVNULL,
+                stdout=output, stderr=subprocess.DEVNULL, timeout=COMMAND_TIMEOUT,
+                env={
+                    "PATH": SAFE_PATH, "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
+                    "GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1",
+                    "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_GLOBAL": "/dev/null",
+                    "GIT_CONFIG_SYSTEM": "/dev/null",
+                },
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise QAFailure("requested Git object could not be verified") from exc
+        if result.returncode != 0:
+            raise QAFailure("requested Git object could not be verified")
+        output.seek(0)
+        data = output.read(MAX_RESPONSE_BYTES + 1)
+    if len(data) > MAX_RESPONSE_BYTES:
+        raise QAFailure("requested Git blob exceeded the QA size limit")
+    return data
+
+
+def _trusted_git_assets(ref: str) -> dict[str, bytes]:
+    commit = _git_output(["rev-parse", "--verify", f"{ref}^{{commit}}"])
+    if commit.decode("ascii", "strict").strip() != ref:
+        raise QAFailure("requested Git commit identity did not match")
+    assets: dict[str, bytes] = {}
+    for name in ("index.js", "style.css"):
+        object_spec = f"{ref}:dashboard/dist/{name}"
+        if _git_output(["cat-file", "-t", object_spec]).strip() != b"blob":
+            raise QAFailure("requested dashboard Git object was not a blob")
+        assets[name] = _git_output(["cat-file", "blob", object_spec])
+    return assets
+
+
+def _validated_installed_assets(hermes_home: Path, repository: str, ref: str) -> dict[str, bytes]:
+    installed = _read_installed_assets(hermes_home, repository, ref)
+    trusted = _trusted_git_assets(ref)
+    if installed != trusted:
+        raise QAFailure("installed dashboard asset did not match the requested Git blob")
+    return installed
+
+
+def _create_sealed_memfd(name: str, payload: bytes) -> int:
+    descriptor = os.memfd_create(name, os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
+    try:
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("short memfd write")
+            view = view[written:]
+        fcntl.fcntl(descriptor, F_ADD_SEALS, REQUIRED_MEMFD_SEALS)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
 
 
 def _cli_plugin_active(payload: Any) -> bool:
@@ -808,6 +897,7 @@ def run_clean_install(
     killpg: Callable[[int, int], None] = os.killpg, timeout: float = TOTAL_TIMEOUT,
     listener_owned: Callable[[OwnedProcess, int], bool] = _listener_is_owned,
     getpgrp: Callable[[], int] = os.getpgrp,
+    asset_loader: Callable[[Path, str, str], dict[str, bytes]] | None = None,
 ) -> dict[str, Any]:
     if sys.platform != "linux":
         raise QAFailure("the real clean-install harness is Linux-only")
@@ -822,6 +912,7 @@ def run_clean_install(
     installed = False
     dashboard: OwnedProcess | None = None
     cdp: OwnedProcess | None = None
+    asset_fds: list[int] = []
     first_error: BaseException | None = None
     cleanup_errors: list[str] = []
 
@@ -848,7 +939,11 @@ def run_clean_install(
             if not _cli_plugin_active(_list_plugins(runner, hermes_executable, env, operation_deadline, monotonic)):
                 raise QAFailure("installed plugin is not active")
             _run_checked(runner, [hermes_executable, "plugins", "show", PLUGIN_ID], env, operation_deadline, monotonic)
-            asset_root = _installed_asset_root(hermes_home, repository, ref)
+            assets = (asset_loader or _validated_installed_assets)(hermes_home, repository, ref)
+            if set(assets) != {"index.js", "style.css"} or not all(
+                isinstance(value, bytes) for value in assets.values()
+            ):
+                raise QAFailure("validated dashboard assets were invalid")
             _run_checked(runner, [hermes_executable, "plugins", "doctor", PLUGIN_ID, "--ci"], env, operation_deadline, monotonic)
 
             last_start_error: QAFailure | None = None
@@ -906,17 +1001,27 @@ def run_clean_install(
             )
             _remaining(snapshot_deadline, monotonic)
 
-            cdp = _spawn_owned(
-                popen,
-                [python_executable, str(ROOT / "scripts" / "qa_dashboard_cdp.py"),
-                 "--chromium", browser_executable, "--url", base_url + "/second-brain",
-                 "--fixture", str(ROOT / "tests" / "fixtures" / "demo_snapshot_v1.json"),
-                 "--asset-root", str(asset_root),
-                 "--output", str(cdp_output), "--inherit-runner-process-group"],
-                env=env, cwd=str(ROOT), stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                getpgrp=getpgrp,
-            )
+            try:
+                asset_fds.append(_create_sealed_memfd("hermes-osb-index-js", assets["index.js"]))
+                asset_fds.append(_create_sealed_memfd("hermes-osb-style-css", assets["style.css"]))
+                cdp = _spawn_owned(
+                    popen,
+                    [python_executable, str(ROOT / "scripts" / "qa_dashboard_cdp.py"),
+                     "--chromium", browser_executable, "--url", base_url + "/second-brain",
+                     "--fixture", str(ROOT / "tests" / "fixtures" / "demo_snapshot_v1.json"),
+                     "--asset-js-fd", str(asset_fds[0]), "--asset-css-fd", str(asset_fds[1]),
+                     "--output", str(cdp_output), "--inherit-runner-process-group"],
+                    env=env, cwd=str(ROOT), stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    pass_fds=tuple(asset_fds), getpgrp=getpgrp,
+                )
+            finally:
+                for descriptor in asset_fds:
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        pass
+                asset_fds = []
             try:
                 returncode = cdp.process.wait(timeout=min(COMMAND_TIMEOUT, _remaining(operation_deadline, monotonic)))
             except subprocess.TimeoutExpired as exc:
@@ -928,6 +1033,12 @@ def run_clean_install(
         except BaseException as exc:
             first_error = exc
         finally:
+            for descriptor in asset_fds:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            asset_fds = []
             try:
                 cleanup_deadline = min(deadline, monotonic() + CLEANUP_TIMEOUT)
             except BaseException as exc:

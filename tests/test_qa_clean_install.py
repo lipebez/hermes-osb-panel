@@ -117,6 +117,7 @@ class Harness:
         self.mutate = mutate or {}
         self.fail_command = fail_command
         self.popen_env = None
+        self.cdp_pass_fds = None
         self.clock = Clock()
         self.wall_clock = lambda: SNAPSHOT_TIME
 
@@ -160,6 +161,7 @@ class Harness:
             self.popen_env = kwargs["env"]
             return self.process
         process = Process(returncode=2 if self.fail_command == "qa_dashboard_cdp.py" else 0)
+        self.cdp_pass_fds = kwargs.get("pass_fds")
         self.processes.append(process)
         return process
 
@@ -226,6 +228,9 @@ class Harness:
             which=lambda value, path="": (
                 "/opt/hermes/bin/hermes" if value == "hermes" else "/usr/bin/chromium"
             ),
+            asset_loader=lambda *_args: {
+                "index.js": b"installed-js", "style.css": b"installed-css",
+            },
         )
 
 
@@ -244,27 +249,25 @@ class ValidationTests(unittest.TestCase):
         (plugin / "dashboard" / "dist" / "style.css").write_bytes(b"installed-css")
         return plugin
 
-    def test_installed_asset_root_comes_from_pinned_metadata_and_manifests(self):
+    def test_installed_assets_come_from_descriptor_anchored_tree(self):
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
-            plugin = self._installed_tree(home)
+            self._installed_tree(home)
             self.assertEqual(
-                qa._installed_asset_root(home, "owner/repo", SHA),
-                (plugin / "dashboard" / "dist").resolve(),
+                qa._read_installed_assets(home, "owner/repo", SHA),
+                {"index.js": b"installed-js", "style.css": b"installed-css"},
             )
 
-    def test_installed_asset_root_rejects_absence_escape_symlink_and_missing_asset(self):
+    def test_installed_assets_reject_absence_escape_symlink_and_missing_asset(self):
         with tempfile.TemporaryDirectory() as temporary, tempfile.TemporaryDirectory() as outside:
             home = Path(temporary)
             with self.assertRaises(qa.QAFailure):
-                qa._installed_asset_root(home, "owner/repo", SHA)
-            with self.assertRaises(qa.QAFailure):
-                qa._owned_install_path(home, Path("..") / "outside", directory=True)
+                qa._read_installed_assets(home, "owner/repo", SHA)
 
             (home / "plugins").symlink_to(Path(outside), target_is_directory=True)
-            self._installed_tree(Path(outside).parent / Path(outside).name)
+            self._installed_tree(Path(outside))
             with self.assertRaises(qa.QAFailure):
-                qa._installed_asset_root(home, "owner/repo", SHA)
+                qa._read_installed_assets(home, "owner/repo", SHA)
 
         with tempfile.TemporaryDirectory() as temporary, tempfile.TemporaryDirectory() as outside:
             home = Path(temporary)
@@ -273,14 +276,72 @@ class ValidationTests(unittest.TestCase):
             (plugin / "dashboard" / "dist").rename(escaped / "dist")
             (plugin / "dashboard" / "dist").symlink_to(escaped / "dist", target_is_directory=True)
             with self.assertRaises(qa.QAFailure):
-                qa._installed_asset_root(home, "owner/repo", SHA)
+                qa._read_installed_assets(home, "owner/repo", SHA)
 
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
             plugin = self._installed_tree(home)
             (plugin / "dashboard" / "dist" / "style.css").unlink()
             with self.assertRaises(qa.QAFailure):
-                qa._installed_asset_root(home, "owner/repo", SHA)
+                qa._read_installed_assets(home, "owner/repo", SHA)
+
+    def test_descriptor_walk_survives_directory_symlink_swap_and_file_replacement(self):
+        with tempfile.TemporaryDirectory() as temporary, tempfile.TemporaryDirectory() as outside:
+            home = Path(temporary)
+            plugin = self._installed_tree(home)
+            dist = plugin / "dashboard" / "dist"
+
+            def swap(label):
+                if label == "plugins/hermes-osb-panel/dashboard/dist":
+                    saved = plugin / "dashboard" / "validated-dist"
+                    dist.rename(saved)
+                    dist.symlink_to(Path(outside), target_is_directory=True)
+                elif label == "plugins/hermes-osb-panel/dashboard/dist/index.js":
+                    asset = plugin / "dashboard" / "validated-dist" / "index.js"
+                    asset.rename(asset.with_suffix(".validated"))
+                    asset.write_bytes(b"replacement-js")
+
+            self.assertEqual(
+                qa._read_installed_assets(home, "owner/repo", SHA, _after_open=swap),
+                {"index.js": b"installed-js", "style.css": b"installed-css"},
+            )
+
+    def test_descriptor_walk_rejects_hardlinks_and_writable_dirs_or_assets(self):
+        for case in ("hardlink", "directory-0777", "asset-0666"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                home = Path(temporary)
+                plugin = self._installed_tree(home)
+                dist = plugin / "dashboard" / "dist"
+                if case == "hardlink":
+                    os.link(dist / "index.js", dist / "index-copy.js")
+                elif case == "directory-0777":
+                    dist.chmod(0o777)
+                else:
+                    (dist / "style.css").chmod(0o666)
+                with self.assertRaises(qa.QAFailure):
+                    qa._read_installed_assets(home, "owner/repo", SHA)
+
+    def test_installed_asset_bytes_must_equal_exact_requested_commit_blobs(self):
+        exact_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=qa.ROOT, check=True,
+            capture_output=True, text=True,
+        ).stdout.strip()
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            plugin = self._installed_tree(home)
+            (home / "plugins" / ".install-metadata.json").write_text(json.dumps({
+                PLUGIN: {"pinned": True, "revision": exact_sha,
+                         "source": "https://github.com/owner/repo.git"},
+            }), encoding="utf-8")
+            for name in ("index.js", "style.css"):
+                (plugin / "dashboard" / "dist" / name).write_bytes(
+                    (qa.ROOT / "dashboard" / "dist" / name).read_bytes()
+                )
+            assets = qa._validated_installed_assets(home, "owner/repo", exact_sha)
+            self.assertEqual(assets["index.js"], (qa.ROOT / "dashboard/dist/index.js").read_bytes())
+            (plugin / "dashboard/dist/index.js").write_bytes(b"wrong blob")
+            with self.assertRaisesRegex(qa.QAFailure, "Git blob"):
+                qa._validated_installed_assets(home, "owner/repo", exact_sha)
     def test_repo_and_ref_are_strict(self):
         self.assertEqual(qa.github_repo("Owner-1/repo.name"), "Owner-1/repo.name")
         self.assertEqual(qa.commit_sha(SHA), SHA)
@@ -297,6 +358,15 @@ class ValidationTests(unittest.TestCase):
         commands = [call for call in harness.calls if call[:1] != ("GET",)]
         self.assertFalse(any(uses_dashboard_stop(command) for command in commands))
         self.assertTrue(uses_dashboard_stop(("hermes", "dashboard", "--stop")))
+
+    @unittest.skipUnless(hasattr(os, "memfd_create"), "Linux memfd required")
+    def test_clean_runner_memfd_is_fully_sealed_for_the_cdp_reader(self):
+        from scripts import qa_dashboard_cdp
+
+        descriptor = qa._create_sealed_memfd("clean-runner-test", b"validated")
+        self.assertEqual(qa_dashboard_cdp.read_sealed_memfd(descriptor), b"validated")
+        with self.assertRaises(OSError):
+            os.fstat(descriptor)
 
     def test_health_assertion_accepts_only_complete_disabled_contract(self):
         qa._assert_health(disabled_health())
@@ -546,10 +616,15 @@ class CleanInstallTests(unittest.TestCase):
         self.assertTrue(Path(harness.popen_env["HOME"]).is_absolute())
         self.assertFalse(Path(harness.popen_env["HOME"]).exists())
         cdp_argv = next(call for call in harness.calls if any(str(item).endswith("qa_dashboard_cdp.py") for item in call))
-        self.assertIn("--asset-root", cdp_argv)
-        asset_root = Path(cdp_argv[cdp_argv.index("--asset-root") + 1])
-        self.assertNotEqual(asset_root, qa.ROOT / "dashboard" / "dist")
-        self.assertIn("hermes-home/plugins/hermes-osb-panel/dashboard/dist", asset_root.as_posix())
+        self.assertIn("--asset-js-fd", cdp_argv)
+        self.assertIn("--asset-css-fd", cdp_argv)
+        self.assertNotIn("--asset-root", cdp_argv)
+        self.assertIsNotNone(harness.cdp_pass_fds)
+        assert harness.cdp_pass_fds is not None
+        self.assertEqual(len(harness.cdp_pass_fds), 2)
+        for descriptor in harness.cdp_pass_fds:
+            with self.assertRaises(OSError):
+                os.fstat(descriptor)
 
     def test_contract_failures_still_stop_and_remove(self):
         cases = {
@@ -1087,6 +1162,9 @@ class HardeningRegressionTests(unittest.TestCase):
             listener_owned=lambda owned, port: True,
             getpgrp=lambda: 999,
             which=lambda value, path="": "/opt/hermes" if value == "hermes" else "/opt/chromium",
+            asset_loader=lambda *_args: {
+                "index.js": b"installed-js", "style.css": b"installed-css",
+            },
         )
         self.assertTrue(result["passed"])
         starts = [call for call in harness.calls if "dashboard" in call]

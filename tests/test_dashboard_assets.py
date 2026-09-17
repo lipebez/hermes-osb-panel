@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -30,27 +31,28 @@ class DashboardAssetTests(unittest.TestCase):
             self.assertNotEqual(installed_js, checkout_js)
             (assets / "index.js").write_bytes(installed_js)
             (assets / "style.css").write_bytes(installed_css)
-            with qa_dashboard_cdp.demo_server(fixture, assets) as url:
+            with qa_dashboard_cdp.demo_server(fixture, installed_js, installed_css) as url:
                 origin = url.rsplit("/", 1)[0]
                 self.assertEqual(urllib.request.urlopen(origin + "/assets/index.js").read(), installed_js)
                 self.assertEqual(urllib.request.urlopen(origin + "/assets/style.css").read(), installed_css)
 
-    def test_fixture_asset_root_rejects_missing_symlink_and_missing_assets(self):
+    def test_fixture_server_keeps_validated_bytes_after_path_replacement(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            with self.assertRaises(argparse.ArgumentTypeError):
-                qa_dashboard_cdp.parse_asset_root(str(root / "absent"))
-            assets = root / "dist"
-            assets.mkdir()
-            (assets / "index.js").write_bytes(b"js")
-            with self.assertRaises(argparse.ArgumentTypeError):
-                qa_dashboard_cdp.parse_asset_root(str(assets))
-            (assets / "style.css").write_bytes(b"css")
-            link = root / "linked-dist"
-            link.symlink_to(assets, target_is_directory=True)
-            with self.assertRaises(argparse.ArgumentTypeError):
-                qa_dashboard_cdp.parse_asset_root(str(link))
-            self.assertEqual(qa_dashboard_cdp.parse_asset_root(str(assets)), assets.resolve())
+            fixture = ROOT / "tests" / "fixtures" / "demo_snapshot_v1.json"
+            path = Path(temporary) / "index.js"
+            path.write_bytes(b"validated")
+            validated = path.read_bytes()
+            path.write_bytes(b"replacement")
+            with qa_dashboard_cdp.demo_server(fixture, validated, b"css") as url:
+                origin = url.rsplit("/", 1)[0]
+                self.assertEqual(urllib.request.urlopen(origin + "/assets/index.js").read(), b"validated")
+
+    @unittest.skipUnless(hasattr(os, "memfd_create"), "Linux memfd required")
+    def test_asset_memfd_is_sealed_and_read_once(self):
+        fd = qa_dashboard_cdp.create_sealed_memfd("test-asset", b"validated")
+        self.assertEqual(qa_dashboard_cdp.read_sealed_memfd(fd), b"validated")
+        with self.assertRaises(OSError):
+            os.fstat(fd)
     def test_release_version_is_consistent_across_metadata_assets_and_docs(self):
         manifest = json.loads((ROOT / "dashboard" / "manifest.json").read_text(encoding="utf-8"))
         plugin_text = (ROOT / "plugin.yaml").read_text(encoding="utf-8")
