@@ -2,7 +2,7 @@
 
 ## Decision status
 
-The UI contract is implemented and exercised with sanitized fixtures. A production OSB adapter is intentionally deferred until the maintainer chooses the canonical integration boundary. This document maps only surfaces documented in the inspected upstream checkout; it does not claim that OSB already emits the dashboard composite snapshot.
+The UI contract is implemented and exercised with sanitized fixtures. A production OSB adapter is intentionally deferred until the maintainer chooses the canonical integration boundary. This document maps only surfaces documented in the inspected **Open Second Brain v1.56.0** checkout at observed commit `54bb28d9b760758446e494e3c6473f6534dfbdee`; it does not claim that OSB already emits the dashboard composite snapshot or that other OSB versions are compatible.
 
 ## Verified public surfaces
 
@@ -10,23 +10,21 @@ The UI contract is implemented and exercised with sanitized fixtures. A producti
 
 `o2b.metrics.v1` is explicitly documented as the stable dashboard-facing on-disk contract:
 
-- `docs/metrics.md:3-7` identifies `Brain/metrics/` as a stable consumer contract that avoids importing internals.
-- `docs/metrics.md:27-45` defines the envelope `{schema, surface, run_at, payload}`.
-- `docs/metrics.md:47-54` defines run-level semantics, torn-line tolerance and bounded records.
-- `docs/metrics.md:56-71` enumerates public surfaces and additive-optional payload fields.
-- `docs/metrics.md:73-84` defines newest-first/fail-soft reading behavior.
-- `docs/stability.md:48-65` lists `o2b.metrics.v1` as a frozen on-disk schema and defines compatible evolution.
+- `docs/metrics.md`, under **Metrics layer - the dashboard data contract**, identifies `Brain/metrics/` as the stable consumer contract that avoids importing internals.
+- `docs/metrics.md`, under **Record envelope**, defines `{schema, surface, run_at, payload}`, run-level records, torn-line tolerance, and bounded writes.
+- `docs/metrics.md`, under **Surfaces and payload fields** and **Reading**, defines additive-optional fields plus newest-first/fail-soft consumer behavior.
+- `docs/stability.md`, under **On-disk format schemas**, lists `o2b.metrics.v1` as a frozen schema and defines compatible evolution.
 
 ### Graph export
 
 The public CLI exposes graph export:
 
-- `docs/cli-reference.md:62-63` documents `o2b brain graph-export` as a stable graph serialization command available since v0.22.0.
-- `docs/stability.md:22-28` freezes the documented CLI verb tree, flags, exit behavior and JSON response shapes under SemVer.
-- `src/core/brain/portability/graph.ts:32-52` defines graph version `1` and node fields `id`, vault-relative `path`, `title`, sorted wikilinks and typed relations.
-- `src/core/brain/portability/graph.ts:75-108` states that export is pure/read-only, excludes Brain machinery and emits deterministically sorted nodes.
+- `docs/cli-reference.md`, in the `o2b brain` verb list, documents `o2b brain graph-export` as stable graph serialization available since v0.22.0.
+- `docs/stability.md`, under **CLI verb tree**, freezes documented verbs, flags, exit behavior, and JSON response shapes under SemVer.
+- `src/cli/command-manifest.ts` registers the `graph-export` command.
+- `src/core/brain/portability/graph.ts` defines `GRAPH_VERSION`, `VaultGraphNode`, and `exportVaultGraph`: graph version `1`; node `id`, vault-relative `path`, `title`, sorted wikilinks, typed relations; Brain machinery exclusion; pure/read-only export; and deterministic node ordering.
 
-The graph serializer is public and deterministic, but its graph version is not listed in the frozen on-disk schema table at `docs/stability.md:48-60`. The maintainer should confirm whether dashboards may consume this format directly or should receive a supported composite facade.
+The graph serializer is public and deterministic, but its graph version is not listed in the **On-disk format schemas** table in `docs/stability.md`. The maintainer should confirm whether dashboards may consume this format directly or should receive a supported composite facade.
 
 ## Field mapping and measured gaps
 

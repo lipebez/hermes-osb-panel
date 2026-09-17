@@ -2,9 +2,9 @@
 
 ## Scope and truthfulness
 
-This protocol verifies the repository, local fixture behavior, and one recorded private-staging check. It does **not** establish public-release availability, broad Hermes compatibility, a production OSB adapter, or an OSB release-version compatibility range. Hermes development/dashboard behavior was validated in local fixture QA against Hermes Agent v0.19.0 (2026.7.20).
+This protocol verifies the repository, local fixture behavior, and narrowly scoped upstream contracts. The validated matrix is Hermes Agent v0.21.3 at upstream commit `dfc28b61a0cfed58bcc200038c6bfec6f31adcd2` and Open Second Brain v1.56.0 at observed commit `54bb28d9b760758446e494e3c6473f6534dfbdee`. The OSB evidence is inspection of documented public surfaces, not a production adapter or a broader version range. At this documentation freeze, before the release merge, no `v3.1.0` tag or GitHub Release existed.
 
-One Windows PowerShell clean-host private-staging installation test achieved plugin discovery, loaded `/second-brain` with the default fail-closed no-local-data state, and then disabled and removed the plugin. This is one staging result, not a claim about other Windows systems, hosts, Hermes versions, or production OSB. No OSB installation or configuration was required for that default fail-closed validation.
+One separate Windows PowerShell staging installation achieved plugin discovery, loaded `/second-brain` with the default fail-closed no-local-data state, and then disabled and removed the plugin. This is retained as a narrow workflow result, not as compatibility evidence for another Hermes version, a Windows clean-install harness result, or a production OSB claim. No OSB installation or configuration was required for that default fail-closed validation.
 
 The shareable data source is only `tests/fixtures/demo_snapshot_v1.json` through `FixtureSnapshotReader`. Never use a real vault for a public screenshot, issue attachment, pull request artifact, or report.
 
@@ -14,34 +14,62 @@ Run from the repository root:
 
 ```bash
 node --check dashboard/dist/index.js
-PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests -v
-PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'import ast, pathlib; [ast.parse(pathlib.Path(path).read_text(encoding="utf-8"), filename=path) for path in ("__init__.py", "dashboard/plugin_api.py", "dashboard/snapshot_contract.py", "scripts/qa_dashboard_cdp.py", "scripts/qa_clean_install.py")]'
+set -o pipefail
+TEST_LOG="$(mktemp /tmp/hermes-osb-panel-tests.XXXXXX)"
+PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests -v 2>&1 | tee "$TEST_LOG"
+TESTS_RUN="$(python3 -c 'import pathlib, re, sys; matches=re.findall(r"Ran (\d+) tests?", pathlib.Path(sys.argv[1]).read_text()); print(matches[-1] if matches else "")' "$TEST_LOG")"
+test -n "$TESTS_RUN"
+rm -f "$TEST_LOG"
+PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'import ast, pathlib, subprocess; [ast.parse(pathlib.Path(path).read_text(encoding="utf-8"), filename=path) for path in subprocess.check_output(["git", "ls-files", "*.py"], text=True).splitlines()]'
 ```
 
-The suite covers normalization, fail-closed reader selection, redaction, fixture handling, plugin contract behavior, static asset egress checks, and release-scanner pure functions. Run it with bytecode disabled and confirm no bytecode artifacts were introduced.
+The discovery command runs the complete current suite without baking a test count into the documentation. It covers normalization, fail-closed reader selection, redaction, fixture handling, plugin contract behavior, static asset egress checks, and release-scanner pure functions. Run it with bytecode disabled and confirm no bytecode artifacts were introduced.
+
+Validate against the exact Hermes checkout without loading or changing an active profile:
+
+```bash
+HERMES_CLI=/path/to/hermes-agent-v0.21.3/venv/bin/hermes
+(
+  QA_HOME="$(mktemp -d)"
+  trap 'rm -rf "$QA_HOME"' EXIT
+  HOME="$QA_HOME" HERMES_HOME="$QA_HOME/hermes" "$HERMES_CLI" plugins doctor . --ci
+)
+```
+
+The executable must be built from `dfc28b61a0cfed58bcc200038c6bfec6f31adcd2`; a matching version string alone is insufficient. The subshell removes its temporary home even if the doctor check fails.
 
 ## Isolated clean-install harness
 
 This real clean-install harness is **Linux-only**. Its ownership proof depends on Linux `/proc` process, session, socket-inode, and listener data; it must fail closed rather than be treated as a Windows or macOS clean-install procedure. The Windows staging result and recovery notes below are separate manual staging evidence, not execution of this harness.
 
-After the candidate commit is available from GitHub at an immutable lowercase SHA, run from a checkout that has a compatible `hermes` executable on `PATH`:
+After the release commit is available from GitHub at an immutable lowercase SHA, run from a checkout that has the exact compatible Hermes v0.21.3 executable on `PATH`:
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa_clean_install.py owner/repo --ref <40-character-lowercase-sha>
+PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa_clean_install.py lipebez/hermes-osb-panel --ref <40-character-lowercase-sha>
 ```
 
-The harness creates disposable `HOME` and `HERMES_HOME` directories outside the repository, writes a random private `install_id` before Dashboard startup, removes OSB discovery and dashboard authentication/session variables from child environments, installs and validates the plugin, starts only its owned loopback Dashboard child, checks the no-OSB fail-closed API state, runs fixture CDP QA, then disables/removes the plugin and confirms absence. Installed manifests and dashboard assets are opened through an `O_DIRECTORY|O_NOFOLLOW` descriptor tree, checked for safe type/link count/permissions, and read once. The asset bytes must equal the `dashboard/dist/index.js` and `dashboard/dist/style.css` Git blobs at the exact requested commit in this checkout. Those validated bytes cross into the CDP runner only through fully sealed anonymous Linux `memfd` descriptors; no asset pathname is reopened. Every accepted clean-install API response is fetched through a new direct persistent HTTP/1.1 connection: `/api/status` must return that exact `install_id`, then the target is fetched on the same unchanged socket. Redirects, proxies, reconnects, connection replacement, missing identity, and oversized or non-JSON responses fail closed and retry the complete transaction under its deadline. Linux `/proc` process-group/listener checks remain an additional defense around API acceptance; unavailable or inconsistent evidence fails closed. These clean-install API identity and listener gates do not attest ownership of the separate CDP fixture-server flow. The harness terminates only the process it started and deletes all temporary state on success or failure. Do not run this command for an unpublished branch: installation intentionally resolves the exact GitHub ref and is not a working-tree test.
+The harness creates disposable `HOME` and `HERMES_HOME` directories outside the repository, writes a random private `install_id` before Dashboard startup, removes OSB discovery and dashboard authentication/session variables from child environments, installs and validates the plugin, starts only its owned loopback Dashboard child, checks the no-OSB fail-closed API state, runs fixture CDP QA, then disables/removes the plugin and confirms absence. Installed manifests and dashboard assets are opened through an `O_DIRECTORY|O_NOFOLLOW` descriptor tree, checked for safe type/link count/permissions, and read once. The asset bytes must equal the `dashboard/dist/index.js` and `dashboard/dist/style.css` Git blobs at the exact requested commit in this checkout. Those validated bytes cross into the CDP runner only through fully sealed anonymous Linux `memfd` descriptors; no asset pathname is reopened. Every accepted clean-install API response is fetched through a new direct persistent HTTP/1.1 connection: `/api/status` must return that exact `install_id`, then the target is fetched on the same unchanged socket. Redirects, proxies, reconnects, connection replacement, missing identity, and oversized or non-JSON responses fail closed and retry the complete transaction under its deadline. Linux `/proc` process-group/listener checks remain an additional defense around API acceptance; unavailable or inconsistent evidence fails closed. These clean-install API identity and listener gates do not attest ownership of the separate CDP fixture-server flow. The harness terminates only the process it started and deletes all temporary state on success or failure. Do not run this command for a commit that is not reachable from the public Git source: installation intentionally resolves the exact remote ref and is not a working-tree test. Because no v3.1.0 release ref existed at this documentation freeze, that final remote clean-install gate was not available yet.
 
 ## Manual CDP matrix
 
-The dashboard host must already be running. The CDP harness does not install, start, or expose a host service. Authenticated runs accept only strict `http`/`https` loopback URLs whose hostname is exactly `127.0.0.1`, `localhost`, or `::1`, without userinfo; this validation occurs before any authentication value is read. Before the first navigation, the harness enables request-stage CDP interception and keeps it active through every assertion. Fixture runs allow HTTP only to the exact generated `http://127.0.0.1:PORT` origin; another port, `localhost`, IPv6, HTTPS, WebSocket, redirects to another origin, `file:` and `chrome-extension:` are blocked and make the run fail. `data:` and `blob:` are the only non-egress schemes allowed because Chromium may use them for in-memory document resources. An exact-origin browser proxy, resolver-deny and background-networking feature controls are defense in depth. Only fixture runs redirect configurable Chromium service bases to that generated origin; GCM endpoints use dedicated `__qa_browser_internal` paths served only by the fixture and disjoint from dashboard assets and APIs. Any proxy denial still fails the run. Root execution still requires Chromium's `--no-sandbox`: this QA isolation is the CDP/flag egress boundary, **not** an operating-system sandbox. When host authentication is used, provide credentials only through an operator-controlled local environment mechanism; never print, save, or commit the password, cookie, or session token.
+The dashboard host must already be running. The CDP harness does not install, start, or expose a host service. Authenticated runs accept only strict `http`/`https` loopback URLs whose hostname is exactly `127.0.0.1`, `localhost`, or `::1`, without userinfo; this validation occurs before any authentication value is read. Fixture Chromium runs route browser traffic through a browser-global exact-origin proxy. The proxy rejects CONNECT, non-exact origins, redirects, request bodies, unexpected response shapes, and other egress; any denial fails the run. Before the first navigation, request-stage CDP interception is enabled and retained through every assertion, while browser API blocking, resolver denial, and background-networking controls provide defense in depth. Fixture runs allow HTTP only to the exact generated `http://127.0.0.1:PORT` origin; another port, `localhost`, IPv6, HTTPS, WebSocket, redirects to another origin, `file:` and `chrome-extension:` are blocked. `data:` and `blob:` are the only non-egress schemes allowed because Chromium may use them for in-memory document resources. Only fixture runs redirect configurable Chromium service bases to that generated origin; GCM endpoints use dedicated `__qa_browser_internal` paths served only by the fixture and disjoint from dashboard assets and APIs. Root execution still requires Chromium's `--no-sandbox`: these proxy/CDP/flag controls are a QA egress boundary, **not** an operating-system sandbox. When host authentication is used, provide credentials only through an operator-controlled local environment mechanism; never print, save, or commit the password, cookie, or session token.
+
+Chromium QA requires the `websocket-client` distribution (the imported module is `websocket`). Install it in a disposable venv outside the repository; do not add it to the Hermes runtime environment:
+
+```bash
+QA_VENV="$(mktemp -d /tmp/hermes-osb-panel-cdp-venv.XXXXXX)"
+python3 -m venv "$QA_VENV"
+"$QA_VENV/bin/python" -m pip install 'websocket-client==1.9.2'
+```
 
 ```bash
 HERMES_WEBUI_ENV_FILE=local-webui.env \
-python3 scripts/qa_dashboard_cdp.py \
+"$QA_VENV/bin/python" scripts/qa_dashboard_cdp.py \
   --url http://127.0.0.1:PORT/second-brain \
   --output /tmp/osb-panel-live-qa
 ```
+
+Keep the same shell for both blocks, then delete the QA-only environment with `rm -rf "$QA_VENV"`. Do not install `websocket-client` into the Hermes runtime environment or add it as a runtime dependency.
 
 Run both renderer modes at all required viewports:
 
@@ -70,35 +98,33 @@ After the relevant gates have run, create the aggregate from explicit values onl
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/build_release_evidence.py \
   --project-version 3.1.0 \
-  --candidate-sha <40-character-candidate-sha> \
-  --tested-hermes-version <tested-semver> \
-  --tested-hermes-ref <40-character-hermes-sha> \
-  --tested-osb-version <tested-semver> \
-  --tested-osb-ref <40-character-osb-sha> \
+  --candidate-sha "$(git rev-parse HEAD)" \
+  --tested-hermes-version 0.21.3 \
+  --tested-hermes-ref dfc28b61a0cfed58bcc200038c6bfec6f31adcd2 \
+  --tested-osb-version 1.56.0 \
+  --tested-osb-ref 54bb28d9b760758446e494e3c6473f6534dfbdee \
   --static-gate-passed true \
   --unit-gate-passed true \
   --archive-gate-passed true \
-  --tests-run <count> \
-  --tests-passed <count> \
-  --tests-failed <count> \
+  --tests-run "$TESTS_RUN" \
+  --tests-passed "$TESTS_RUN" \
+  --tests-failed 0 \
   --output /tmp/hermes-osb-panel-release-evidence.json
 ```
 
-The builder accepts only semantic versions, immutable SHAs, booleans, and consistent non-negative test counts. It does not read Git, the repository, environment variables, host state, secrets, screenshots, reports, or raw logs. Do not add any of those materials to its arguments or output. The JSON has a fixed schema and canonical key ordering, so identical inputs produce identical bytes.
+`TESTS_RUN` comes from the successful complete-suite command above rather than a count frozen in documentation; keep the same shell or export the verified value explicitly. The builder accepts only semantic versions, immutable SHAs, booleans, and consistent non-negative test counts. It does not itself read Git, the repository, environment variables, host state, secrets, screenshots, reports, or raw logs; the shell resolves the explicit SHA and count arguments before invocation. Do not add sensitive materials to its arguments or output. The JSON has a fixed schema and canonical key ordering, so identical inputs produce identical bytes.
 
 Review the generated file locally. Only its safe aggregate facts may be copied into release notes. Do not commit the JSON by default, and delete the `/tmp` file after the release review.
 
 ## Archive-only public release scanner
 
-After a separately authorized first local commit exists, run:
+After the intended release documentation and source are committed locally, run:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/check_public_release.py
 ```
 
-The production gate scans exactly `git archive HEAD`. With no `HEAD`, it intentionally returns a nonzero fail-closed result stating that a committed release candidate is required. Do **not** run the archive-only production scanner as a substitute for an uncommitted candidate, and do not replace it with a working-tree scan.
-
-The private-staging archive gate passed. That evidence is separate from public publication and does not replace the archive-only gate for an authorized public-release candidate.
+The production gate scans exactly `git archive HEAD`; it does not see uncommitted edits. Do **not** use its result as a substitute for validating the intended committed release tree, and do not replace it with a working-tree scan. A pass does not imply that a tag or GitHub Release exists.
 
 The scanner prints only `filename: category` for findings. For manual scanner artifact retention, keep that terminal result only long enough to remove the offending material; do not commit scanner logs, reports, screenshots, or copies of matched content. A pass emits no artifact. The exact neutral binary fixture exception is `tests/fixtures/release_scanner_neutral.png`; do not add broad fixture, test, PII, or media exclusions.
 

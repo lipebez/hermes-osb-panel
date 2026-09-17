@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Before public launch, the planned published repository must enable **GitHub private vulnerability reporting**. Once enabled, use that private reporting channel for security reports.
+Use **GitHub private vulnerability reporting** for security reports. Do not put vulnerability details or sensitive reproduction material in a public issue.
 
 If private reporting is unavailable, **do not open a public issue containing vulnerability details, vault data, paths, screenshots, credentials, tokens, cookies, session material, or reproduction data from a real vault**. Instead, contact `@lipebez` through GitHub and request a private reporting route. No security email address is published because none has been established for this project.
 
@@ -19,11 +19,11 @@ Please do not disclose a vulnerability publicly before a coordinated fix or the 
 
 ## Supported versions
 
-Until the first authorized public release, only the current `Unreleased` candidate is in scope for private pre-publication reporting. After publication, support will apply to the latest published release and the current development branch until this policy is updated. Older releases may receive guidance but are not promised fixes.
+The supported release line is **3.1.x**. At this documentation freeze, before the release merge, no `v3.1.0` tag or GitHub Release existed; reports against the exact 3.1.x source commit are still accepted privately. Versions before 3.1 are unsupported. Support for a later minor line must be stated here rather than inferred.
 
 ## Security boundary and non-goals
 
-Hermes OSB Panel is a read-only, independent community companion. It is not an official Hermes Agent or Open Second Brain component, and it does not provide a production OSB adapter.
+Hermes OSB Panel is a privacy-first, read-only, independent community companion. It is not an official Hermes Agent or Open Second Brain component, and it does not provide a production OSB adapter.
 
 The default reader is fail-closed: a vault is not read without explicit process-local opt-in. The optional direct reader is for a single authenticated owner-controlled dashboard only. It may display owner-visible titles and safe previews to authenticated viewers. It does **not** promise multi-user, multi-profile, team, tenant, or role isolation; do not deploy it as though it did.
 
