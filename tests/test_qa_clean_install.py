@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -381,41 +382,137 @@ class HardeningRegressionTests(unittest.TestCase):
              "LC_ALL": "C.UTF-8", "PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1"},
         )
 
-    def test_http_uses_no_proxy_no_redirect_opener_and_requires_json(self):
-        class Response:
-            headers = {"Content-Type": "application/json; charset=utf-8"}
-            def getcode(self):
-                return 200
-            def read(self, limit):
-                self.limit = limit
-                return b'{"ok": true}'
-            def __enter__(self):
-                return self
-            def __exit__(self, *args):
-                return False
+    class Response:
+        def __init__(
+            self, payload, *, content_type="application/json", status=200, version=11,
+            will_close=False, after_read=None,
+        ):
+            self.body = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+            self.headers = {"Content-Type": content_type}
+            self.status = status
+            self.version = version
+            self.will_close = will_close
+            self.after_read = after_read
+            self.limits = []
+        def read(self, limit):
+            self.limits.append(limit)
+            if self.after_read:
+                self.after_read()
+            return self.body
 
-        response = Response()
-        opener = mock.Mock()
-        opener.open.return_value = response
-        loopback = "http:" + "//" + "127.0.0.1:43123/health"
-        with mock.patch.object(qa.urllib.request, "build_opener", return_value=opener) as build:
-            self.assertEqual(qa._fetch_json(loopback, 1.5, 43123), {"ok": True})
-        handlers = build.call_args.args
-        proxy = next(item for item in handlers if isinstance(item, qa.urllib.request.ProxyHandler))
-        self.assertEqual(proxy.proxies, {})
-        self.assertTrue(any(isinstance(item, qa._NoRedirect) for item in handlers))
-        self.assertEqual(response.limit, qa.MAX_RESPONSE_BYTES + 1)
+    class Connection:
+        def __init__(self, responses):
+            self.responses = list(responses)
+            self.sock = None
+            self.socket = object()
+            self.connects = 0
+            self.requests = []
+        def connect(self):
+            self.connects += 1
+            self.sock = self.socket
+        def request(self, method, path, *, headers):
+            self.requests.append((method, path, headers))
+        def getresponse(self):
+            return self.responses.pop(0)
+        def close(self):
+            self.sock = None
 
-        for status, content_type, message in ((302, "application/json", "non-success"), (200, "text/html", "non-JSON")):
-            response.getcode = lambda value=status: value
-            response.headers = {"Content-Type": content_type}
-            with mock.patch.object(qa.urllib.request, "build_opener", return_value=opener):
-                with self.assertRaisesRegex(qa.QAFailure, message):
-                    qa._fetch_json(loopback, 1, 43123)
-        opener.open.side_effect = qa.urllib.error.HTTPError(loopback, 302, "redirect", {}, None)
-        with mock.patch.object(qa.urllib.request, "build_opener", return_value=opener):
-            with self.assertRaisesRegex(qa.QAFailure, "redirect was refused"):
-                qa._fetch_json(loopback, 1, 43123)
+    def transaction(self, responses, **kwargs):
+        connection = self.Connection(responses)
+        result = qa._fetch_json_transaction(
+            "http:" + "//" + "127.0.0.1:43123/target", 1.5, 43123, "a" * 32,
+            connection_factory=lambda host, port, timeout: connection, **kwargs,
+        )
+        return result, connection
+
+    def test_http_pins_status_and_target_to_one_http11_connection(self):
+        status = self.Response({"install_id": "a" * 32})
+        target = self.Response({"ok": True})
+        result, connection = self.transaction([status, target])
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(connection.connects, 1)
+        self.assertEqual([request[1] for request in connection.requests], ["/api/status", "/target"])
+        self.assertEqual(status.limits, [qa.MAX_STATUS_RESPONSE_BYTES + 1])
+        self.assertEqual(target.limits, [qa.MAX_RESPONSE_BYTES + 1])
+
+    def test_http_rejects_missing_or_wrong_install_id(self):
+        for payload in ({}, {"install_id": "b" * 32}):
+            with self.subTest(payload=payload), self.assertRaisesRegex(qa.QAFailure, "identity"):
+                self.transaction([self.Response(payload), self.Response({"ok": True})])
+
+    def test_http_close_after_status_fails_without_reconnect(self):
+        connection = self.Connection([])
+        status = self.Response({"install_id": "a" * 32}, after_read=lambda: setattr(connection, "sock", None))
+        connection.responses = [status, self.Response({"ok": True})]
+        with self.assertRaisesRegex(qa.QAFailure, "connection"):
+            qa._fetch_json_transaction(
+                "http:" + "//" + "127.0.0.1:43123/target", 1, 43123, "a" * 32,
+                connection_factory=lambda host, port, timeout: connection,
+            )
+        self.assertEqual(connection.connects, 1)
+        self.assertEqual([item[1] for item in connection.requests], ["/api/status"])
+
+    def test_http_rejects_socket_or_connection_swap(self):
+        for replacement in (object(), None):
+            connection = self.Connection([])
+            status = self.Response(
+                {"install_id": "a" * 32}, after_read=lambda value=replacement: setattr(connection, "sock", value)
+            )
+            connection.responses = [status, self.Response({"ok": True})]
+            with self.subTest(replacement=replacement), self.assertRaisesRegex(qa.QAFailure, "connection"):
+                qa._fetch_json_transaction(
+                    "http:" + "//" + "127.0.0.1:43123/target", 1, 43123, "a" * 32,
+                    connection_factory=lambda host, port, timeout: connection,
+                )
+
+    def test_http_enforces_status_and_target_limits_and_json_contract(self):
+        cases = (
+            ([self.Response(b"{" + b"x" * qa.MAX_STATUS_RESPONSE_BYTES), self.Response({})], "size"),
+            ([self.Response({"install_id": "a" * 32}), self.Response(b"{" + b"x" * qa.MAX_RESPONSE_BYTES)], "size"),
+            ([self.Response({"install_id": "a" * 32}, content_type="text/html"), self.Response({})], "non-JSON"),
+            ([self.Response({"install_id": "a" * 32}), self.Response({}, content_type="text/html")], "non-JSON"),
+            ([self.Response({}, status=302), self.Response({})], "non-success"),
+            ([self.Response({"install_id": "a" * 32}), self.Response({}, status=503)], "non-success"),
+            ([self.Response({"install_id": "a" * 32}, version=10), self.Response({})], "HTTP/1.1"),
+            ([self.Response({"install_id": "a" * 32}, will_close=True), self.Response({})], "persistent"),
+        )
+        for responses, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(qa.QAFailure, message):
+                self.transaction(responses)
+
+    def test_install_id_is_random_valid_and_private(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            hermes_home = Path(temporary)
+            first = qa._create_install_id(hermes_home)
+            path = hermes_home / "install_id"
+            self.assertRegex(first, r"^[0-9a-f]{32}$")
+            self.assertEqual(path.read_text(encoding="ascii"), first)
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            path.unlink()
+            self.assertNotEqual(first, qa._create_install_id(hermes_home))
+
+    def test_retryable_identity_failure_restarts_the_complete_transaction(self):
+        clock = Clock()
+        attempts = []
+        payload = [{"name": PLUGIN}]
+        def fetch(url, timeout):
+            attempts.append((url, timeout))
+            if len(attempts) == 1:
+                raise qa._RetryableFetchFailure("dashboard install identity did not match")
+            return payload
+        result = qa._wait_json(
+            fetch, "http:" + "//" + "127.0.0.1:43123/plugins", Process(), clock.sleep,
+            qa._dashboard_plugin_present, timeout=1, monotonic=clock.monotonic,
+            listener_owned=lambda: True,
+        )
+        self.assertIs(result, payload)
+        self.assertEqual(len(attempts), 2)
+
+    def test_pinned_connection_refuses_a_second_connect_without_network(self):
+        connection = qa._PinnedHTTPConnection("127.0.0.1", 43123)
+        connection._pin_connect_attempted = True
+        with self.assertRaises(qa.http.client.CannotSendRequest):
+            connection.connect()
 
     def test_http_rejects_every_destination_except_expected_ipv4_loopback(self):
         bad = (
@@ -423,11 +520,11 @@ class HardeningRegressionTests(unittest.TestCase):
             "http:" + "//" + "127.0.0.1:43124/x", "http:" + "//" + "user@127.0.0.1:43123/x",
             "http://example.test:43123/x",
         )
-        with mock.patch.object(qa.urllib.request, "build_opener") as build:
-            for url in bad:
-                with self.subTest(url=url), self.assertRaisesRegex(qa.QAFailure, "owned loopback"):
-                    qa._fetch_json(url, 1, 43123)
-        build.assert_not_called()
+        factory = mock.Mock()
+        for url in bad:
+            with self.subTest(url=url), self.assertRaisesRegex(qa.QAFailure, "owned loopback"):
+                qa._fetch_json_transaction(url, 1, 43123, "a" * 32, connection_factory=factory)
+        factory.assert_not_called()
 
     def test_stop_signals_only_the_recorded_owned_group(self):
         process = Process()
