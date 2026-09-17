@@ -28,7 +28,10 @@ jobs:
         run: node --check dashboard/dist/index.js
 
       - name: Parse Python sources
-        run: PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'import ast, pathlib; [ast.parse(pathlib.Path(path).read_text(encoding="utf-8"), filename=path) for path in ("__init__.py", "dashboard/plugin_api.py", "dashboard/snapshot_contract.py", "scripts/qa_dashboard_cdp.py")]'
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'import ast, pathlib; [ast.parse(pathlib.Path(path).read_text(encoding="utf-8"), filename=path) for path in ("__init__.py", "dashboard/plugin_api.py", "dashboard/snapshot_contract.py", "scripts/qa_dashboard_cdp.py", "scripts/qa_clean_install.py")]'
+
+      - name: Run isolated clean-install harness unit tests
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest tests.test_qa_clean_install -v
 
       - name: Run unit tests without bytecode
         run: PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests -v

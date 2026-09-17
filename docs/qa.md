@@ -15,10 +15,20 @@ Run from the repository root:
 ```bash
 node --check dashboard/dist/index.js
 PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests -v
-PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'import ast, pathlib; [ast.parse(pathlib.Path(path).read_text(encoding="utf-8"), filename=path) for path in ("__init__.py", "dashboard/plugin_api.py", "dashboard/snapshot_contract.py", "scripts/qa_dashboard_cdp.py")]'
+PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'import ast, pathlib; [ast.parse(pathlib.Path(path).read_text(encoding="utf-8"), filename=path) for path in ("__init__.py", "dashboard/plugin_api.py", "dashboard/snapshot_contract.py", "scripts/qa_dashboard_cdp.py", "scripts/qa_clean_install.py")]'
 ```
 
 The suite covers normalization, fail-closed reader selection, redaction, fixture handling, plugin contract behavior, static asset egress checks, and release-scanner pure functions. Run it with bytecode disabled and confirm no bytecode artifacts were introduced.
+
+## Isolated clean-install harness
+
+After the candidate commit is available from GitHub at an immutable lowercase SHA, run from a checkout that has a compatible `hermes` executable on `PATH`:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/qa_clean_install.py owner/repo --ref <40-character-lowercase-sha>
+```
+
+The harness creates disposable `HOME` and `HERMES_HOME` directories outside the repository, removes OSB discovery and dashboard authentication/session variables from child environments, installs and validates the plugin, starts only its owned loopback Dashboard child, checks the no-OSB fail-closed API state, runs fixture CDP QA, then disables/removes the plugin and confirms absence. It terminates only the process it started and deletes all temporary state on success or failure. Do not run this command for an unpublished branch: installation intentionally resolves the exact GitHub ref and is not a working-tree test.
 
 ## Manual CDP matrix
 
