@@ -5,6 +5,7 @@ import os
 import stat
 import subprocess
 import tempfile
+import time
 import unittest
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -342,6 +343,79 @@ class ValidationTests(unittest.TestCase):
             (plugin / "dashboard/dist/index.js").write_bytes(b"wrong blob")
             with self.assertRaisesRegex(qa.QAFailure, "Git blob"):
                 qa._validated_installed_assets(home, "owner/repo", exact_sha)
+
+    def test_oversize_git_blob_is_rejected_from_size_without_materializing_blob(self):
+        calls = []
+
+        def git_output(arguments, **_kwargs):
+            calls.append(tuple(arguments))
+            if arguments[0] == "rev-parse":
+                return (SHA + "\n").encode("ascii")
+            if arguments[1] == "-t":
+                return b"blob\n"
+            if arguments[1] == "-s":
+                return f"{qa.MAX_RESPONSE_BYTES + 1}\n".encode("ascii")
+            self.fail("blob contents must not be requested after an oversize declaration")
+
+        with mock.patch.object(qa, "_git_output", side_effect=git_output):
+            with self.assertRaisesRegex(qa.QAFailure, "size limit"):
+                qa._trusted_git_assets(SHA)
+        self.assertFalse(any(call[1:3] == ("cat-file", "blob") for call in calls))
+
+    def test_git_blob_size_is_strict_bounded_decimal(self):
+        for announced in (b"+1\n", b"01\n", b"1 \n", b"9" * 1000):
+            with self.subTest(announced=announced[:20]):
+                def git_output(arguments, **_kwargs):
+                    if arguments[0] == "rev-parse":
+                        return (SHA + "\n").encode("ascii")
+                    if arguments[1] == "-t":
+                        return b"blob\n"
+                    if arguments[1] == "-s":
+                        return announced
+                    self.fail("malformed size must prevent blob materialization")
+
+                with mock.patch.object(qa, "_git_output", side_effect=git_output):
+                    with self.assertRaisesRegex(qa.QAFailure, "size"):
+                        qa._trusted_git_assets(SHA)
+
+    def test_git_blob_rejects_short_and_extra_producer_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fake_git = Path(temporary) / "git"
+            fake_git.write_text(
+                "#!/usr/bin/python3\n"
+                "import os, sys\n"
+                "os.write(1, b'ab' if sys.argv[-1] == 'short' else b'abcd')\n",
+                encoding="utf-8",
+            )
+            fake_git.chmod(0o755)
+            with mock.patch.object(qa.shutil, "which", return_value=str(fake_git)):
+                for mode in ("short", "extra"):
+                    with self.subTest(mode=mode), self.assertRaisesRegex(qa.QAFailure, "size"):
+                        qa._git_output([mode], expected_size=3)
+
+    def test_git_blob_stream_over_cap_terminates_early_without_process_leak(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fake_git = Path(temporary) / "git"
+            marker = Path(temporary) / "pid"
+            fake_git.write_text(
+                "#!/usr/bin/python3\n"
+                "import os, sys, time\n"
+                "open(sys.argv[-1], 'w').write(str(os.getpid()))\n"
+                "while True:\n"
+                "    os.write(1, b'x' * 65536)\n"
+                "    time.sleep(0.001)\n",
+                encoding="utf-8",
+            )
+            fake_git.chmod(0o755)
+            started = time.monotonic()
+            with mock.patch.object(qa.shutil, "which", return_value=str(fake_git)):
+                with self.assertRaisesRegex(qa.QAFailure, "size"):
+                    qa._git_output([str(marker)], expected_size=qa.MAX_RESPONSE_BYTES)
+            self.assertLess(time.monotonic() - started, 3.0)
+            pid = int(marker.read_text(encoding="utf-8"))
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pid, 0)
+
     def test_repo_and_ref_are_strict(self):
         self.assertEqual(qa.github_repo("Owner-1/repo.name"), "Owner-1/repo.name")
         self.assertEqual(qa.commit_sha(SHA), SHA)

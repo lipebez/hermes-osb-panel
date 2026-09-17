@@ -560,49 +560,132 @@ def _read_installed_assets(
                 pass
 
 
-def _git_output(arguments: Sequence[str]) -> bytes:
+def _git_output(
+    arguments: Sequence[str], *, max_bytes: int = MAX_RESPONSE_BYTES,
+    expected_size: int | None = None, deadline: float | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> bytes:
     git = shutil.which("git", path=SAFE_PATH)
     if not git:
         raise QAFailure("git was unavailable for commit blob verification")
-    with tempfile.TemporaryFile() as output:
-        try:
-            result = subprocess.run(
-                [git, "-C", str(ROOT), *arguments], stdin=subprocess.DEVNULL,
-                stdout=output, stderr=subprocess.DEVNULL, timeout=COMMAND_TIMEOUT,
-                env={
-                    "PATH": SAFE_PATH, "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
-                    "GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1",
-                    "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_GLOBAL": "/dev/null",
-                    "GIT_CONFIG_SYSTEM": "/dev/null",
-                },
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            raise QAFailure("requested Git object could not be verified") from exc
-        if result.returncode != 0:
+    if max_bytes < 0 or expected_size is not None and not 0 <= expected_size <= max_bytes:
+        raise QAFailure("requested Git output size was invalid")
+    operation_deadline = min(
+        deadline if deadline is not None else float("inf"), monotonic() + COMMAND_TIMEOUT,
+    )
+    _remaining(operation_deadline, monotonic)
+    owned: OwnedProcess | None = None
+    stream = None
+    failure: BaseException | None = None
+    data = bytearray()
+    limit = expected_size if expected_size is not None else max_bytes
+    try:
+        owned = _spawn_owned(
+            subprocess.Popen, [git, "-C", str(ROOT), *arguments],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            env={
+                "PATH": SAFE_PATH, "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
+                "GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1",
+                "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_CONFIG_SYSTEM": "/dev/null",
+            },
+        )
+        stream = owned.process.stdout
+        if stream is None:
             raise QAFailure("requested Git object could not be verified")
-        output.seek(0)
-        data = output.read(MAX_RESPONSE_BYTES + 1)
-    if len(data) > MAX_RESPONSE_BYTES:
-        raise QAFailure("requested Git blob exceeded the QA size limit")
-    return data
+        descriptor = stream.fileno()
+        os.set_blocking(descriptor, False)
+        with selectors.DefaultSelector() as selector:
+            selector.register(descriptor, selectors.EVENT_READ)
+            while True:
+                if not selector.select(_remaining(operation_deadline, monotonic)):
+                    raise QAFailure("clean-install QA deadline exceeded")
+                try:
+                    chunk = os.read(descriptor, min(65536, limit + 1 - len(data)))
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    break
+                data.extend(chunk)
+                if len(data) > limit:
+                    if expected_size is not None:
+                        raise QAFailure("requested Git blob size did not match its declaration")
+                    raise QAFailure("requested Git output exceeded the QA size limit")
+        try:
+            returncode = owned.process.wait(timeout=_remaining(operation_deadline, monotonic))
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            raise QAFailure("requested Git object could not be verified") from exc
+        if returncode != 0:
+            raise QAFailure("requested Git object could not be verified")
+        if expected_size is not None and len(data) != expected_size:
+            raise QAFailure("requested Git blob size did not match its declaration")
+        return bytes(data)
+    except (OSError, subprocess.SubprocessError) as exc:
+        failure = exc
+        raise QAFailure("requested Git object could not be verified") from exc
+    except BaseException as exc:
+        failure = exc
+        raise
+    finally:
+        cleanup_error: BaseException | None = None
+        if stream is not None:
+            try:
+                stream.close()
+            except BaseException as exc:
+                cleanup_error = exc
+        try:
+            _stop_owned(owned, time.monotonic() + CLEANUP_TIMEOUT, time.monotonic)
+        except BaseException as exc:
+            if cleanup_error is None:
+                cleanup_error = exc
+        if failure is None and cleanup_error is not None:
+            raise cleanup_error
 
 
-def _trusted_git_assets(ref: str) -> dict[str, bytes]:
-    commit = _git_output(["rev-parse", "--verify", f"{ref}^{{commit}}"])
-    if commit.decode("ascii", "strict").strip() != ref:
+def _trusted_git_assets(
+    ref: str, *, deadline: float | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> dict[str, bytes]:
+    operation_deadline = deadline if deadline is not None else monotonic() + COMMAND_TIMEOUT
+    commit = _git_output(
+        ["rev-parse", "--verify", f"{ref}^{{commit}}"],
+        deadline=operation_deadline, monotonic=monotonic,
+    )
+    try:
+        commit_identity = commit.decode("ascii", "strict").strip()
+    except UnicodeError as exc:
+        raise QAFailure("requested Git commit identity did not match") from exc
+    if commit_identity != ref:
         raise QAFailure("requested Git commit identity did not match")
     assets: dict[str, bytes] = {}
     for name in ("index.js", "style.css"):
         object_spec = f"{ref}:dashboard/dist/{name}"
-        if _git_output(["cat-file", "-t", object_spec]).strip() != b"blob":
+        if _git_output(
+            ["cat-file", "-t", object_spec], deadline=operation_deadline, monotonic=monotonic,
+        ) != b"blob\n":
             raise QAFailure("requested dashboard Git object was not a blob")
-        assets[name] = _git_output(["cat-file", "blob", object_spec])
+        size_field = _git_output(
+            ["cat-file", "-s", object_spec], max_bytes=32,
+            deadline=operation_deadline, monotonic=monotonic,
+        )
+        if not re.fullmatch(rb"(?:0|[1-9][0-9]*)\n", size_field):
+            raise QAFailure("requested Git blob size was invalid")
+        size = int(size_field[:-1])
+        if size > MAX_RESPONSE_BYTES:
+            raise QAFailure("requested Git blob exceeded the QA size limit")
+        assets[name] = _git_output(
+            ["cat-file", "blob", object_spec], expected_size=size,
+            deadline=operation_deadline, monotonic=monotonic,
+        )
     return assets
 
 
-def _validated_installed_assets(hermes_home: Path, repository: str, ref: str) -> dict[str, bytes]:
+def _validated_installed_assets(
+    hermes_home: Path, repository: str, ref: str, *, deadline: float | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> dict[str, bytes]:
     installed = _read_installed_assets(hermes_home, repository, ref)
-    trusted = _trusted_git_assets(ref)
+    trusted = _trusted_git_assets(ref, deadline=deadline, monotonic=monotonic)
     if installed != trusted:
         raise QAFailure("installed dashboard asset did not match the requested Git blob")
     return installed
@@ -939,7 +1022,12 @@ def run_clean_install(
             if not _cli_plugin_active(_list_plugins(runner, hermes_executable, env, operation_deadline, monotonic)):
                 raise QAFailure("installed plugin is not active")
             _run_checked(runner, [hermes_executable, "plugins", "show", PLUGIN_ID], env, operation_deadline, monotonic)
-            assets = (asset_loader or _validated_installed_assets)(hermes_home, repository, ref)
+            if asset_loader is None:
+                assets = _validated_installed_assets(
+                    hermes_home, repository, ref, deadline=operation_deadline, monotonic=monotonic,
+                )
+            else:
+                assets = asset_loader(hermes_home, repository, ref)
             if set(assets) != {"index.js", "style.css"} or not all(
                 isinstance(value, bytes) for value in assets.values()
             ):
