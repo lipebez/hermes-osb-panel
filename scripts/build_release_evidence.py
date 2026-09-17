@@ -9,9 +9,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import secrets
+import stat
+import sys
 from pathlib import Path
-from typing import Sequence
+from typing import NoReturn, Sequence
 
 
 _NUMERIC_IDENTIFIER = r"(?:0|[1-9][0-9]*)"
@@ -22,6 +26,7 @@ _VERSION = re.compile(
     r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
 )
 _SHA = re.compile(r"[0-9a-f]{40}")
+_CLI_ERROR = "error: unable to create release evidence\n"
 
 
 def _validated_version(field: str, value: object) -> str:
@@ -109,25 +114,101 @@ def _boolean(value: str) -> bool:
     raise argparse.ArgumentTypeError("expected 'true' or 'false'")
 
 
-def _output_path(value: str) -> Path:
+def _output_path(value: str) -> tuple[Path, str]:
     output = Path(value)
-    if not output.is_absolute() or output.is_symlink():
+    if not output.is_absolute() or output.name in ("", ".", ".."):
         raise ValueError("output must be an absolute path below /tmp")
 
     try:
         temporary_root = Path("/tmp").resolve(strict=True)
-        resolved_output = output.resolve(strict=False)
-        resolved_output.relative_to(temporary_root)
+        resolved_parent = output.parent.resolve(strict=True)
+        resolved_parent.relative_to(temporary_root)
     except (OSError, RuntimeError, ValueError):
         raise ValueError("output must be an absolute path below /tmp") from None
 
-    if resolved_output == temporary_root:
+    if resolved_parent == temporary_root and output.name in ("", ".", ".."):
         raise ValueError("output must be an absolute path below /tmp")
-    return resolved_output
+    return resolved_parent, output.name
+
+
+def _open_parent(parent: Path) -> int:
+    """Open a validated parent without following mutable path symlinks."""
+    temporary_root = Path("/tmp").resolve(strict=True)
+    relative = parent.relative_to(temporary_root)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+    directory_fd = os.open(temporary_root, flags)
+    try:
+        for component in relative.parts:
+            next_fd = os.open(component, flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+        return directory_fd
+    except BaseException:
+        os.close(directory_fd)
+        raise
+
+
+def _publish_atomic(output: tuple[Path, str], content: str) -> None:
+    parent, destination = output
+    directory_fd = _open_parent(parent)
+    temporary_name: str | None = None
+    temporary_fd: int | None = None
+    try:
+        try:
+            destination_stat = os.stat(destination, dir_fd=directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            destination_stat = None
+        if destination_stat is not None and stat.S_ISLNK(destination_stat.st_mode):
+            raise ValueError("output must not be a symlink")
+
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+        for _ in range(128):
+            candidate = f".release-evidence-{secrets.token_hex(16)}.tmp"
+            try:
+                temporary_fd = os.open(candidate, flags, 0o600, dir_fd=directory_fd)
+                temporary_name = candidate
+                break
+            except FileExistsError:
+                continue
+        else:
+            raise OSError("unable to allocate temporary output")
+
+        data = content.encode("utf-8")
+        offset = 0
+        while offset < len(data):
+            written = os.write(temporary_fd, data[offset:])
+            if written <= 0:
+                raise OSError("short write")
+            offset += written
+        os.fsync(temporary_fd)
+        os.close(temporary_fd)
+        temporary_fd = None
+        os.replace(
+            temporary_name,
+            destination,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+        )
+        temporary_name = None
+        os.fsync(directory_fd)
+    finally:
+        if temporary_fd is not None:
+            os.close(temporary_fd)
+        if temporary_name is not None:
+            try:
+                os.unlink(temporary_name, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+        os.close(directory_fd)
+
+
+class _BoundedArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        raise ValueError("invalid command line")
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = _BoundedArgumentParser(description=__doc__)
     parser.add_argument("--project-version", required=True)
     parser.add_argument("--candidate-sha", required=True)
     parser.add_argument("--tested-hermes-version", required=True)
@@ -145,24 +226,28 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
-    evidence = build_evidence(
-        project_version=args.project_version,
-        candidate_sha=args.candidate_sha,
-        tested_hermes_version=args.tested_hermes_version,
-        tested_hermes_ref=args.tested_hermes_ref,
-        tested_osb_version=args.tested_osb_version,
-        tested_osb_ref=args.tested_osb_ref,
-        static_gate_passed=args.static_gate_passed,
-        unit_gate_passed=args.unit_gate_passed,
-        archive_gate_passed=args.archive_gate_passed,
-        tests_run=args.tests_run,
-        tests_passed=args.tests_passed,
-        tests_failed=args.tests_failed,
-    )
-    output = _output_path(args.output)
-    output.write_text(encode_evidence(evidence), encoding="utf-8", newline="")
-    return 0
+    try:
+        args = _parser().parse_args(argv)
+        evidence = build_evidence(
+            project_version=args.project_version,
+            candidate_sha=args.candidate_sha,
+            tested_hermes_version=args.tested_hermes_version,
+            tested_hermes_ref=args.tested_hermes_ref,
+            tested_osb_version=args.tested_osb_version,
+            tested_osb_ref=args.tested_osb_ref,
+            static_gate_passed=args.static_gate_passed,
+            unit_gate_passed=args.unit_gate_passed,
+            archive_gate_passed=args.archive_gate_passed,
+            tests_run=args.tests_run,
+            tests_passed=args.tests_passed,
+            tests_failed=args.tests_failed,
+        )
+        output = _output_path(args.output)
+        _publish_atomic(output, encode_evidence(evidence))
+        return 0
+    except (ValueError, OSError, RuntimeError):
+        sys.stderr.write(_CLI_ERROR)
+        return 2
 
 
 if __name__ == "__main__":

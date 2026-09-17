@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import io
 import json
+import os
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 from scripts.build_release_evidence import build_evidence, encode_evidence, main
 
@@ -197,25 +201,29 @@ class ReleaseEvidenceTests(unittest.TestCase):
             output = directory / "output.json"
             output.symlink_to(target)
 
-            with self.assertRaises(ValueError):
-                main(cli_args(output))
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                self.assertEqual(main(cli_args(output)), 2)
 
             self.assertEqual(target.read_text(encoding="utf-8"), "unchanged")
+            self.assertEqual(stderr.getvalue(), "error: unable to create release evidence\n")
 
     def test_cli_rejects_symlinked_parent_that_escapes_tmp_before_write(self):
-        with TemporaryDirectory(dir="/tmp") as temp_dir, TemporaryDirectory(dir="/") as outside_dir:
+        repository_root = Path(__file__).resolve().parents[1]
+        with TemporaryDirectory(dir="/tmp") as temp_dir, TemporaryDirectory(dir=repository_root) as outside_dir:
             linked_parent = Path(temp_dir) / "linked-parent"
             linked_parent.symlink_to(outside_dir, target_is_directory=True)
             escaped_output = Path(outside_dir) / "evidence.json"
 
-            with self.assertRaises(ValueError):
-                main(cli_args(linked_parent / "evidence.json"))
+            with redirect_stderr(io.StringIO()):
+                self.assertEqual(main(cli_args(linked_parent / "evidence.json")), 2)
 
             self.assertFalse(escaped_output.exists())
 
     def test_cli_rejects_output_outside_tmp(self):
-        with self.assertRaises(ValueError) as caught:
-            main([
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            result = main([
                 "--project-version", "3.1.0",
                 "--candidate-sha", SHA,
                 "--tested-hermes-version", "0.21.3",
@@ -230,7 +238,81 @@ class ReleaseEvidenceTests(unittest.TestCase):
                 "--tests-failed", "0",
                 "--output", "release-evidence.json",
             ])
-        self.assertEqual(str(caught.exception), "output must be an absolute path below /tmp")
+        self.assertEqual(result, 2)
+        self.assertEqual(stderr.getvalue(), "error: unable to create release evidence\n")
+        self.assertNotIn(str(Path.cwd()), stderr.getvalue())
+
+    def test_atomic_publish_replaces_hard_link_without_mutating_other_target(self):
+        repository_root = Path(__file__).resolve().parents[1]
+        with TemporaryDirectory(dir="/tmp") as temp_dir, TemporaryDirectory(dir=repository_root) as outside_dir:
+            outside = Path(outside_dir) / "outside.json"
+            outside.write_text("outside unchanged", encoding="utf-8")
+            output = Path(temp_dir) / "evidence.json"
+            os.link(outside, output)
+
+            self.assertEqual(main(cli_args(output)), 0)
+
+            self.assertEqual(outside.read_text(encoding="utf-8"), "outside unchanged")
+            self.assertEqual(json.loads(output.read_text(encoding="utf-8")), build_evidence(**safe_inputs()))
+            self.assertNotEqual(output.stat().st_ino, outside.stat().st_ino)
+
+    def test_destination_symlink_race_is_harmless(self):
+        repository_root = Path(__file__).resolve().parents[1]
+        real_replace = os.replace
+        with TemporaryDirectory(dir="/tmp") as temp_dir, TemporaryDirectory(dir=repository_root) as outside_dir:
+            outside = Path(outside_dir) / "outside.json"
+            outside.write_text("outside unchanged", encoding="utf-8")
+            output = Path(temp_dir) / "evidence.json"
+
+            def insert_symlink_then_replace(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
+                os.symlink(outside, dst, dir_fd=dst_dir_fd)
+                return real_replace(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+            with mock.patch("scripts.build_release_evidence.os.replace", side_effect=insert_symlink_then_replace):
+                self.assertEqual(main(cli_args(output)), 0)
+
+            self.assertEqual(outside.read_text(encoding="utf-8"), "outside unchanged")
+            self.assertFalse(output.is_symlink())
+            self.assertEqual(json.loads(output.read_text(encoding="utf-8")), build_evidence(**safe_inputs()))
+
+    def test_atomic_write_interruption_preserves_final_and_cleans_temp(self):
+        real_write = os.write
+        writes = 0
+        with TemporaryDirectory(dir="/tmp") as temp_dir:
+            directory = Path(temp_dir)
+            output = directory / "evidence.json"
+            original = '{"complete": true}\n'
+            output.write_text(original, encoding="utf-8")
+            stderr = io.StringIO()
+
+            def interrupt_after_partial_write(fd, data):
+                nonlocal writes
+                writes += 1
+                if writes == 1:
+                    return real_write(fd, data[:10])
+                raise InterruptedError("private path /secret")
+
+            with mock.patch("scripts.build_release_evidence.os.write", side_effect=interrupt_after_partial_write):
+                with redirect_stderr(stderr):
+                    self.assertEqual(main(cli_args(output)), 2)
+
+            self.assertEqual(output.read_text(encoding="utf-8"), original)
+            self.assertEqual(list(directory.iterdir()), [output])
+            self.assertEqual(stderr.getvalue(), "error: unable to create release evidence\n")
+            self.assertNotIn("private", stderr.getvalue())
+
+    def test_cli_validation_error_is_bounded_and_non_reflective(self):
+        with TemporaryDirectory(dir="/tmp") as temp_dir:
+            secret_value = "/absolute/private/source/value"
+            args = cli_args(Path(temp_dir) / "evidence.json")
+            args[args.index("--project-version") + 1] = secret_value
+            stderr = io.StringIO()
+
+            with redirect_stderr(stderr):
+                self.assertEqual(main(args), 2)
+
+            self.assertEqual(stderr.getvalue(), "error: unable to create release evidence\n")
+            self.assertNotIn(secret_value, stderr.getvalue())
 
 
 if __name__ == "__main__":
