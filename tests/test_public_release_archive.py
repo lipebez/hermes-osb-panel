@@ -421,6 +421,22 @@ class GitArchiveProcessTests(unittest.TestCase):
         self.assertIsNotNone(child.poll())
         self.assert_process_group_absent(child.pid)
 
+    def test_unconfirmed_group_absence_fails_closed(self):
+        real_popen = subprocess.Popen
+
+        def replacement(_command: object, **options: Any) -> subprocess.Popen[bytes]:
+            return cast(
+                subprocess.Popen[bytes],
+                real_popen([sys.executable, "-c", "import os; os.write(1, b'archive')"], **options),
+            )
+
+        with (
+            mock.patch("scripts.check_public_release.subprocess.Popen", side_effect=replacement),
+            mock.patch("scripts.check_public_release._wait_process_group_absent", return_value=False),
+            self.assertRaisesRegex(RuntimeError, "process group cleanup"),
+        ):
+            _git_archive_head(timeout_seconds=1.0, cleanup_grace_seconds=0.05)
+
 
 if __name__ == "__main__":
     unittest.main()

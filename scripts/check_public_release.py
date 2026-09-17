@@ -307,14 +307,21 @@ def _git_archive_head(
                 if failure is None:
                     failure, failure_traceback = error, error.__traceback__
             try:
-                _wait_process_group_absent(pgid, cleanup_grace_seconds)
+                group_absent = _wait_process_group_absent(pgid, cleanup_grace_seconds)
             except BaseException as error:
                 if failure is None:
                     failure, failure_traceback = error, error.__traceback__
+            if not group_absent and failure is None:
+                error = RuntimeError("release archive process group cleanup could not be confirmed")
+                failure, failure_traceback = error, error.__traceback__
         try:
-            _bounded_wait(process, cleanup_grace_seconds)
+            reaped = _bounded_wait(process, cleanup_grace_seconds)
         except BaseException as error:
             if failure is None:
+                failure, failure_traceback = error, error.__traceback__
+        else:
+            if reaped is None and failure is None:
+                error = RuntimeError("release archive process cleanup could not be confirmed")
                 failure, failure_traceback = error, error.__traceback__
     if failure is not None:
         raise failure.with_traceback(failure_traceback)
@@ -363,7 +370,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    payload = _git_archive_head()
+    try:
+        payload = _git_archive_head()
+    except (OSError, RuntimeError):
+        print("public release scanner: git archive cleanup failed.", file=sys.stderr)
+        return 2
     if payload is None:
         print("public release scanner: git archive HEAD failed.", file=sys.stderr)
         return 2
