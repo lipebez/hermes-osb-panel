@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import subprocess
 import tarfile
 import unittest
 from pathlib import Path
@@ -22,6 +23,34 @@ def archive_bytes(entries: dict[str, bytes]) -> bytes:
     return output.getvalue()
 
 
+def candidate_tree_entries(repository_root: Path) -> dict[str, bytes]:
+    """Return files that could enter a release, excluding Git-ignored local state."""
+    if (repository_root / ".git").exists():
+        completed = subprocess.run(
+            ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+            cwd=repository_root,
+            check=True,
+            capture_output=True,
+        )
+        relative_paths = (
+            Path(raw.decode("utf-8"))
+            for raw in completed.stdout.split(b"\0")
+            if raw
+        )
+    else:
+        relative_paths = (
+            path.relative_to(repository_root)
+            for path in repository_root.rglob("*")
+            if path.is_file() and ".git" not in path.relative_to(repository_root).parts
+        )
+
+    return {
+        path.as_posix(): (repository_root / path).read_bytes()
+        for path in relative_paths
+        if (repository_root / path).is_file()
+    }
+
+
 class PublicReleaseArchiveScannerTests(unittest.TestCase):
     def categories_for(self, entries: dict[str, bytes]) -> set[tuple[str, str]]:
         return {
@@ -30,15 +59,23 @@ class PublicReleaseArchiveScannerTests(unittest.TestCase):
         }
 
     def test_current_candidate_tree_archive_has_no_findings(self):
-        """Exercise the pure scanner against the current non-Git candidate bytes."""
+        """Exercise the scanner against tracked and non-ignored candidate bytes."""
         repository_root = Path(__file__).resolve().parents[1]
-        entries = {
-            path.relative_to(repository_root).as_posix(): path.read_bytes()
-            for path in repository_root.rglob("*")
-            if path.is_file() and ".git" not in path.relative_to(repository_root).parts
-        }
+        entries = candidate_tree_entries(repository_root)
 
         self.assertEqual(scan_archive_bytes(archive_bytes(entries)), [])
+
+    def test_candidate_tree_excludes_git_ignored_local_artifacts(self):
+        repository_root = Path(__file__).resolve().parents[1]
+        ignored_artifact = repository_root / ".hermes" / "candidate-tree-regression.txt"
+        ignored_artifact.parent.mkdir(parents=True, exist_ok=True)
+        ignored_artifact.write_text("/" + "root/private-local-path\n", encoding="utf-8")
+        try:
+            entries = candidate_tree_entries(repository_root)
+        finally:
+            ignored_artifact.unlink(missing_ok=True)
+
+        self.assertNotIn(".hermes/candidate-tree-regression.txt", entries)
 
     def test_detects_environment_artifacts_by_archive_filename(self):
         findings = self.categories_for(
