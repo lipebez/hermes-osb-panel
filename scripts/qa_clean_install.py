@@ -128,12 +128,19 @@ def _plugin_entry(payload: Any) -> dict[str, Any] | None:
     return None
 
 
-def _active(payload: Any) -> bool:
+def _cli_plugin_active(payload: Any) -> bool:
     item = _plugin_entry(payload)
     if not item:
         return False
     status = str(item.get("status", item.get("state", ""))).casefold()
     return item.get("enabled") is True or item.get("active") is True or status in {"active", "enabled", "loaded"}
+
+
+def _dashboard_plugin_present(payload: Any) -> bool:
+    """Match the filtered manifest list returned by /api/dashboard/plugins."""
+    return isinstance(payload, list) and any(
+        isinstance(item, dict) and item.get("name") == PLUGIN_ID for item in payload
+    )
 
 
 def _run_checked(
@@ -267,7 +274,7 @@ def run_clean_install(
         try:
             _run_checked(runner, [hermes, "plugins", "install", repository, "--ref", ref, "--enable"], env)
             installed = True
-            if not _active(_list_plugins(runner, hermes, env)):
+            if not _cli_plugin_active(_list_plugins(runner, hermes, env)):
                 raise QAFailure("installed plugin is not active")
             _run_checked(runner, [hermes, "plugins", "show", PLUGIN_ID], env)
             _run_checked(runner, [hermes, "plugins", "doctor", PLUGIN_ID, "--ci"], env)
@@ -283,7 +290,13 @@ def run_clean_install(
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
             )
-            _wait_json(fetch_json, base_url + "/api/dashboard/plugins", dashboard, sleep, _active)
+            _wait_json(
+                fetch_json,
+                base_url + "/api/dashboard/plugins",
+                dashboard,
+                sleep,
+                _dashboard_plugin_present,
+            )
             health = fetch_json(base_url + f"/api/plugins/{PLUGIN_ID}/health", 5.0)
             _assert_health(health)
             snapshot = fetch_json(base_url + f"/api/plugins/{PLUGIN_ID}/snapshot", 5.0)

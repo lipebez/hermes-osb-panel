@@ -85,7 +85,21 @@ class Harness:
     def fetch(self, url, timeout):
         self.calls.append(("GET", url))
         if url.endswith("/api/dashboard/plugins"):
-            value = {"plugins": [{"id": PLUGIN, "enabled": True, "status": "active"}]}
+            value = [
+                {
+                    "name": PLUGIN,
+                    "label": "Open Second Brain",
+                    "description": "Read-only visual companion for Open Second Brain snapshots.",
+                    "icon": "BrainCircuit",
+                    "version": "3.1.0",
+                    "tab": {"path": "/second-brain", "position": "after:plugins"},
+                    "slots": [],
+                    "entry": "dist/index.js",
+                    "css": "dist/style.css?v=3.1.0",
+                    "has_api": True,
+                    "source": "user",
+                }
+            ]
             key = "plugins"
         elif url.endswith("/health"):
             value = {"ok": False, "provider": {"available": False, "mode": "disabled"}}
@@ -136,15 +150,9 @@ class ValidationTests(unittest.TestCase):
 
 
 class CleanInstallTests(unittest.TestCase):
-    def test_wait_json_polls_until_plugin_is_active(self):
+    def assert_waits_for_dashboard_manifest(self, responses):
         clock = Clock()
-        responses = iter(
-            [
-                {"plugins": []},
-                {"plugins": [{"id": PLUGIN, "enabled": False, "status": "inactive"}]},
-                {"plugins": [{"id": PLUGIN, "enabled": True, "status": "active"}]},
-            ]
-        )
+        responses = iter(responses)
         calls = []
 
         def fetch(url, timeout):
@@ -152,27 +160,76 @@ class CleanInstallTests(unittest.TestCase):
             return next(responses)
 
         result = qa._wait_json(
-            fetch, "http:" + "//" + "127.0.0.1:43123/plugins", Process(), clock.sleep, qa._active,
+            fetch,
+            "http:" + "//" + "127.0.0.1:43123/plugins",
+            Process(),
+            clock.sleep,
+            qa._dashboard_plugin_present,
             timeout=1.0, monotonic=clock.monotonic,
         )
 
-        self.assertTrue(qa._active(result))
-        self.assertEqual(len(calls), 3)
+        self.assertTrue(qa._dashboard_plugin_present(result))
+        self.assertEqual(len(calls), 2)
 
-    def test_wait_json_times_out_when_plugin_never_becomes_active(self):
+    def test_wait_json_polls_from_empty_until_manifest_is_present(self):
+        self.assert_waits_for_dashboard_manifest([[], [{"name": PLUGIN}]])
+
+    def test_wait_json_polls_past_other_plugin_until_target_manifest_is_present(self):
+        self.assert_waits_for_dashboard_manifest(
+            [[{"name": "another-dashboard-plugin"}], [{"name": PLUGIN}]]
+        )
+
+    def test_wait_json_times_out_when_target_manifest_is_absent(self):
         clock = Clock()
         calls = []
 
         def fetch(url, timeout):
             calls.append((url, timeout))
-            return {"plugins": [{"id": PLUGIN, "enabled": False}]}
+            return [{"name": "another-dashboard-plugin", "route": "/another"}]
 
         with self.assertRaisesRegex(qa.QAFailure, "did not become ready"):
             qa._wait_json(
-                fetch, "http:" + "//" + "127.0.0.1:43123/plugins", Process(), clock.sleep, qa._active,
+                fetch,
+                "http:" + "//" + "127.0.0.1:43123/plugins",
+                Process(),
+                clock.sleep,
+                qa._dashboard_plugin_present,
                 timeout=0.25, monotonic=clock.monotonic,
             )
         self.assertEqual(len(calls), 3)
+
+    def test_dashboard_manifest_presence_does_not_require_cli_state_fields(self):
+        manifest = {
+            "name": PLUGIN,
+            "label": "Open Second Brain",
+            "description": "Read-only visual companion for Open Second Brain snapshots.",
+            "icon": "BrainCircuit",
+            "version": "3.1.0",
+            "tab": {"path": "/second-brain", "position": "after:plugins"},
+            "slots": [],
+            "entry": "dist/index.js",
+            "css": "dist/style.css?v=3.1.0",
+            "has_api": True,
+            "source": "user",
+        }
+
+        self.assertTrue(qa._dashboard_plugin_present([manifest]))
+
+    def test_dashboard_manifest_presence_ignores_contradictory_synthetic_state(self):
+        for state in (
+            {"enabled": False},
+            {"active": False},
+            {"status": "inactive"},
+            {"state": "disabled"},
+        ):
+            with self.subTest(state=state):
+                self.assertTrue(qa._dashboard_plugin_present([{"name": PLUGIN, **state}]))
+
+    def test_cli_activation_and_dashboard_manifest_predicates_are_separate(self):
+        cli_payload = {"plugins": [{"id": PLUGIN, "enabled": False, "status": "inactive"}]}
+
+        self.assertFalse(qa._cli_plugin_active(cli_payload))
+        self.assertFalse(qa._dashboard_plugin_present(cli_payload))
 
     def test_wait_json_limits_transient_fetch_failures(self):
         clock = Clock()
@@ -184,7 +241,11 @@ class CleanInstallTests(unittest.TestCase):
 
         with self.assertRaisesRegex(qa.QAFailure, "repeatedly unavailable"):
             qa._wait_json(
-                fetch, "http:" + "//" + "127.0.0.1:43123/plugins", Process(), clock.sleep, qa._active,
+                fetch,
+                "http:" + "//" + "127.0.0.1:43123/plugins",
+                Process(),
+                clock.sleep,
+                qa._dashboard_plugin_present,
                 timeout=10.0, max_failures=3, monotonic=clock.monotonic,
             )
         self.assertEqual(len(calls), 3)
