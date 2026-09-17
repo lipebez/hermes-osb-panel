@@ -404,7 +404,7 @@ class HardeningRegressionTests(unittest.TestCase):
         def __init__(self, responses):
             self.responses = list(responses)
             self.sock = None
-            self.socket = object()
+            self.socket = mock.Mock()
             self.connects = 0
             self.requests = []
         def connect(self):
@@ -416,6 +416,37 @@ class HardeningRegressionTests(unittest.TestCase):
             return self.responses.pop(0)
         def close(self):
             self.sock = None
+
+    class TimedSocket:
+        def __init__(self):
+            self.timeouts = []
+        def settimeout(self, timeout):
+            self.timeouts.append(timeout)
+
+    class TimedConnection(Connection):
+        def __init__(self, responses, clock, delays):
+            super().__init__(responses)
+            self.socket = HardeningRegressionTests.TimedSocket()
+            self.clock = clock
+            self.delays = iter(delays)
+            self.timeout = None
+        def _advance(self):
+            self.clock.now += next(self.delays)
+        def connect(self):
+            self._advance()
+            super().connect()
+        def request(self, method, path, *, headers):
+            self._advance()
+            super().request(method, path, headers=headers)
+        def getresponse(self):
+            self._advance()
+            response = super().getresponse()
+            original_read = response.read
+            def read(limit):
+                self._advance()
+                return original_read(limit)
+            response.read = read
+            return response
 
     def transaction(self, responses, **kwargs):
         connection = self.Connection(responses)
@@ -434,6 +465,36 @@ class HardeningRegressionTests(unittest.TestCase):
         self.assertEqual([request[1] for request in connection.requests], ["/api/status", "/target"])
         self.assertEqual(status.limits, [qa.MAX_STATUS_RESPONSE_BYTES + 1])
         self.assertEqual(target.limits, [qa.MAX_RESPONSE_BYTES + 1])
+
+    def test_http_deadline_is_recomputed_for_every_blocking_stage(self):
+        clock = Clock()
+        connection = self.TimedConnection(
+            [self.Response({"install_id": "a" * 32}), self.Response({"ok": True})],
+            clock, [0.6, 0.6],
+        )
+        with self.assertRaisesRegex(qa.QAFailure, "deadline"):
+            qa._fetch_json_transaction(
+                "http:" + "//" + "127.0.0.1:43123/target", 1.0, 43123, "a" * 32,
+                connection_factory=lambda host, port, timeout: connection, monotonic=clock.monotonic,
+            )
+        self.assertEqual(connection.connects, 1)
+        self.assertEqual([item[1] for item in connection.requests], ["/api/status"])
+
+    def test_http_deadline_accepts_exact_boundary_and_short_sequence(self):
+        for delays in ([0.1] * 7, [0.125] * 6 + [0.25]):
+            with self.subTest(delays=delays):
+                clock = Clock()
+                connection = self.TimedConnection(
+                    [self.Response({"install_id": "a" * 32}), self.Response({"ok": True})],
+                    clock, delays,
+                )
+                result = qa._fetch_json_transaction(
+                    "http:" + "//" + "127.0.0.1:43123/target", 1.0, 43123, "a" * 32,
+                    connection_factory=lambda host, port, timeout: connection, monotonic=clock.monotonic,
+                )
+                self.assertEqual(result, {"ok": True})
+                self.assertEqual(len(connection.socket.timeouts), 6)
+                self.assertEqual(connection.timeout, connection.socket.timeouts[-1])
 
     def test_http_rejects_missing_or_wrong_install_id(self):
         for payload in ({}, {"install_id": "b" * 32}):
@@ -507,6 +568,21 @@ class HardeningRegressionTests(unittest.TestCase):
         )
         self.assertIs(result, payload)
         self.assertEqual(len(attempts), 2)
+
+    def test_retryable_transaction_is_not_restarted_without_budget(self):
+        clock = Clock()
+        attempts = []
+        def fetch(url, timeout):
+            attempts.append((url, timeout))
+            clock.now += timeout
+            raise qa._RetryableFetchFailure("dashboard connection failed")
+        with self.assertRaisesRegex(qa.QAFailure, "did not become ready"):
+            qa._wait_json(
+                fetch, "http:" + "//" + "127.0.0.1:43123/plugins", Process(), clock.sleep,
+                qa._dashboard_plugin_present, timeout=1, monotonic=clock.monotonic,
+                listener_owned=lambda: True,
+            )
+        self.assertEqual(len(attempts), 1)
 
     def test_pinned_connection_refuses_a_second_connect_without_network(self):
         connection = qa._PinnedHTTPConnection("127.0.0.1", 43123)

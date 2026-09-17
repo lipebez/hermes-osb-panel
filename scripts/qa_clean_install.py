@@ -145,14 +145,39 @@ def _validate_loopback_url(url: str, expected_port: int) -> str:
     return path + (("?" + parsed.query) if parsed.query else "")
 
 
-def _read_pinned_json(connection: Any, socket_identity: Any, path: str, limit: int) -> Any:
+def _http_stage_timeout(
+    connection: Any, socket_identity: Any, deadline: float, monotonic: Callable[[], float],
+) -> None:
+    remaining = deadline - monotonic()
+    if remaining <= 0:
+        raise QAFailure("clean-install QA deadline exceeded")
+    connection.timeout = remaining
+    if socket_identity is not None:
+        if connection.sock is not socket_identity:
+            raise _RetryableFetchFailure("dashboard connection identity changed")
+        socket_identity.settimeout(remaining)
+
+
+def _http_stage_complete(deadline: float, monotonic: Callable[[], float]) -> None:
+    if monotonic() > deadline:
+        raise QAFailure("clean-install QA deadline exceeded")
+
+
+def _read_pinned_json(
+    connection: Any, socket_identity: Any, path: str, limit: int,
+    deadline: float, monotonic: Callable[[], float],
+) -> Any:
     if connection.sock is not socket_identity or socket_identity is None:
         raise _RetryableFetchFailure("dashboard connection identity changed")
     try:
+        _http_stage_timeout(connection, socket_identity, deadline, monotonic)
         connection.request("GET", path, headers={"Accept": "application/json", "Connection": "keep-alive"})
+        _http_stage_complete(deadline, monotonic)
         if connection.sock is not socket_identity:
             raise _RetryableFetchFailure("dashboard connection identity changed")
+        _http_stage_timeout(connection, socket_identity, deadline, monotonic)
         response = connection.getresponse()
+        _http_stage_complete(deadline, monotonic)
         if connection.sock is not socket_identity:
             raise _RetryableFetchFailure("dashboard connection identity changed")
         if response.version != 11:
@@ -164,7 +189,9 @@ def _read_pinned_json(connection: Any, socket_identity: Any, path: str, limit: i
             raise _RetryableFetchFailure("dashboard returned a non-JSON content type")
         if response.will_close:
             raise _RetryableFetchFailure("dashboard connection was not persistent")
+        _http_stage_timeout(connection, socket_identity, deadline, monotonic)
         body = response.read(limit + 1)
+        _http_stage_complete(deadline, monotonic)
     except _RetryableFetchFailure:
         raise
     except (OSError, http.client.HTTPException) as exc:
@@ -182,21 +209,27 @@ def _read_pinned_json(connection: Any, socket_identity: Any, path: str, limit: i
 def _fetch_json_transaction(
     url: str, timeout: float, expected_port: int, expected_install_id: str,
     connection_factory: Callable[..., Any] = _PinnedHTTPConnection,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> Any:
     """Authenticate status and fetch a target over one pinned direct socket."""
     target = _validate_loopback_url(url, expected_port)
     if not re.fullmatch(r"[0-9a-f]{32}", expected_install_id):
         raise QAFailure("expected dashboard identity is invalid")
+    deadline = monotonic() + timeout
     connection = connection_factory("127.0.0.1", expected_port, timeout=timeout)
     try:
+        _http_stage_timeout(connection, None, deadline, monotonic)
         connection.connect()
+        _http_stage_complete(deadline, monotonic)
         socket_identity = connection.sock
         if socket_identity is None:
             raise _RetryableFetchFailure("dashboard connection identity was unavailable")
-        status = _read_pinned_json(connection, socket_identity, "/api/status", MAX_STATUS_RESPONSE_BYTES)
+        status = _read_pinned_json(
+            connection, socket_identity, "/api/status", MAX_STATUS_RESPONSE_BYTES, deadline, monotonic,
+        )
         if not isinstance(status, dict) or status.get("install_id") != expected_install_id:
             raise _RetryableFetchFailure("dashboard install identity did not match")
-        return _read_pinned_json(connection, socket_identity, target, MAX_RESPONSE_BYTES)
+        return _read_pinned_json(connection, socket_identity, target, MAX_RESPONSE_BYTES, deadline, monotonic)
     except _RetryableFetchFailure:
         raise
     except (OSError, http.client.HTTPException) as exc:
