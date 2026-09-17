@@ -51,6 +51,31 @@ Check shell fit, internal scroll reachability, no horizontal residual scroll, no
 
 Do not commit, attach, upload, or retain CDP output in the repository. Real-vault CDP output is never shareable and must be deleted after local inspection. A later tracked visual baseline requires an explicit privacy review and a dedicated release-scanner-safe policy; none is approved here.
 
+## Sanitized release-evidence summary
+
+After the relevant gates have run, create the aggregate from explicit values only. Use immutable lowercase 40-character commit SHAs for the candidate and both tested refs, and write directly below `/tmp`:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/build_release_evidence.py \
+  --project-version 3.1.0 \
+  --candidate-sha <40-character-candidate-sha> \
+  --tested-hermes-version <tested-semver> \
+  --tested-hermes-ref <40-character-hermes-sha> \
+  --tested-osb-version <tested-semver> \
+  --tested-osb-ref <40-character-osb-sha> \
+  --static-gate-passed true \
+  --unit-gate-passed true \
+  --archive-gate-passed true \
+  --tests-run <count> \
+  --tests-passed <count> \
+  --tests-failed <count> \
+  --output /tmp/hermes-osb-panel-release-evidence.json
+```
+
+The builder accepts only semantic versions, immutable SHAs, booleans, and consistent non-negative test counts. It does not read Git, the repository, environment variables, host state, secrets, screenshots, reports, or raw logs. Do not add any of those materials to its arguments or output. The JSON has a fixed schema and canonical key ordering, so identical inputs produce identical bytes.
+
+Review the generated file locally. Only its safe aggregate facts may be copied into release notes. Do not commit the JSON by default, and delete the `/tmp` file after the release review.
+
 ## Archive-only public release scanner
 
 After a separately authorized first local commit exists, run:
