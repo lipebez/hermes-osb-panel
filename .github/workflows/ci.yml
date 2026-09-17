@@ -27,6 +27,9 @@ jobs:
       - name: Check JavaScript syntax
         run: node --check dashboard/dist/index.js
 
+      - name: Parse Python sources
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'import ast, pathlib; [ast.parse(pathlib.Path(path).read_text(encoding="utf-8"), filename=path) for path in ("__init__.py", "dashboard/plugin_api.py", "dashboard/snapshot_contract.py", "scripts/qa_dashboard_cdp.py")]'
+
       - name: Run unit tests without bytecode
         run: PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests -v
 
@@ -35,3 +38,42 @@ jobs:
 
       - name: Check whitespace errors
         run: git diff --check
+
+  hermes-runtime-contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      HOME: ${{ runner.temp }}/hermes-user
+      HERMES_UPSTREAM_COMMIT: dfc28b61a0cfed58bcc200038c6bfec6f31adcd2
+      HERMES_HOME: ${{ runner.temp }}/hermes-home
+      HERMES_INSTALL_DIR: ${{ runner.temp }}/hermes-agent
+      HERMES_CLI: ${{ runner.temp }}/hermes-agent/venv/bin/hermes
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Hermes in an isolated directory
+        run: |
+          curl --proto '=https' --tlsv1.2 -fsSL \
+            "https://raw.githubusercontent.com/NousResearch/hermes-agent/${HERMES_UPSTREAM_COMMIT}/scripts/install.sh" \
+            -o "${RUNNER_TEMP}/install-hermes.sh"
+          bash "${RUNNER_TEMP}/install-hermes.sh" \
+            --commit "${HERMES_UPSTREAM_COMMIT}" \
+            --force-commit \
+            --dir "${HERMES_INSTALL_DIR}" \
+            --hermes-home "${HERMES_HOME}" \
+            --skip-setup \
+            --skip-browser \
+            --skip-computer-use \
+            --no-skills \
+            --non-interactive
+          test "$(git -C "${HERMES_INSTALL_DIR}" rev-parse HEAD)" = "${HERMES_UPSTREAM_COMMIT}"
+          test -x "${HERMES_CLI}"
+
+      - name: Validate catalog admission contract
+        run: ${HERMES_CLI} plugins validate . --json
+
+      - name: Validate runtime plugin contracts
+        run: ${HERMES_CLI} plugins doctor . --ci
