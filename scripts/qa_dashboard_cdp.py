@@ -27,7 +27,7 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 DEFAULT_VIEWPORTS = [(1440, 900), (1280, 577), (1024, 768), (390, 844)]
 ROOT = Path(__file__).resolve().parents[1]
@@ -57,6 +57,7 @@ CHROMIUM_DISABLED_FEATURES = (
     "DefaultSearchEnginePrewarm",
     "PreconnectToSearch",
 )
+CLEANUP_TIMEOUT = 10.0
 
 try:
     from dashboard.snapshot_contract import sanitize_report_payload
@@ -279,9 +280,11 @@ def demo_server(
     try:
         yield f"http://127.0.0.1:{server.server_port}/second-brain"
     finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=3)
+        run_cleanup_steps(None, [
+            server.shutdown,
+            server.server_close,
+            lambda: thread.join(timeout=3),
+        ])
 
 
 def sanitize_report(value: Any, key: str = "") -> Any:
@@ -514,9 +517,11 @@ def browser_proxy(page_url: str, *, require_fixture_origin: bool = True):
     try:
         yield boundary, int(server.server_port)
     finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=3)
+        run_cleanup_steps(None, [
+            server.shutdown,
+            server.server_close,
+            lambda: thread.join(timeout=3),
+        ])
 
 
 class CDP:
@@ -1318,15 +1323,44 @@ def chromium_environment() -> dict[str, str]:
     return {key: value for key, value in os.environ.items() if key.lower() not in denied}
 
 
-def run_cleanup_steps(primary: BaseException | None, steps: list[Any]) -> None:
-    """Run all cleanup steps; preserve the first exception, including BaseException."""
+def run_cleanup_steps(
+    primary: BaseException | None,
+    steps: list[Callable[[], Any]],
+    *,
+    timeout: float = CLEANUP_TIMEOUT,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> None:
+    """Run every cleanup step and retry one interrupted step within a fixed budget."""
+
     first = primary
+    try:
+        cleanup_deadline = monotonic() + timeout
+    except BaseException as exc:
+        if first is None:
+            first = exc
+        cleanup_deadline = None
+
     for step in steps:
-        try:
-            step()
-        except BaseException as exc:
-            if first is None:
-                first = exc
+        interrupted = False
+        while True:
+            try:
+                step()
+                break
+            except BaseException as exc:
+                if first is None:
+                    first = exc
+                if isinstance(exc, Exception) or interrupted:
+                    break
+                if cleanup_deadline is not None:
+                    try:
+                        expired = monotonic() >= cleanup_deadline
+                    except BaseException as clock_exc:
+                        if first is None:
+                            first = clock_exc
+                        break
+                    if expired:
+                        break
+                interrupted = True
     if primary is None and first is not None:
         raise first
 

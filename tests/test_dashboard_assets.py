@@ -146,6 +146,7 @@ class DashboardAssetTests(unittest.TestCase):
         class DisableFailure(BaseException):
             pass
 
+        disable_attempts = 0
         process = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(60)"],
             start_new_session=True,
@@ -156,6 +157,8 @@ class DashboardAssetTests(unittest.TestCase):
             thread.start()
 
         def disable():
+            nonlocal disable_attempts
+            disable_attempts += 1
             raise DisableFailure("disable-first")
 
         def close():
@@ -171,9 +174,119 @@ class DashboardAssetTests(unittest.TestCase):
         with self.assertRaisesRegex(DisableFailure, "disable-first"):
             qa_dashboard_cdp.run_cleanup_steps(None, steps)
 
+        self.assertEqual(disable_attempts, 2)
         self.assertIsNotNone(process.poll())
         self.assertTrue(all(server.fileno() == -1 for server in servers))
         self.assertTrue(all(not thread.is_alive() for thread in threads))
+
+    def test_cleanup_resumes_interrupted_real_process_stop_and_preserves_identity(self):
+        class StopInterrupted(BaseException):
+            pass
+
+        cancellation = StopInterrupted("stop-first")
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            start_new_session=True,
+        )
+        profile = tempfile.TemporaryDirectory(prefix="cleanup-profile-")
+        profile_path = Path(profile.name)
+        server = ThreadingTCPServer(("127.0.0.1", 0), BaseRequestHandler)
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        stop_attempts = 0
+        later_steps: list[str] = []
+        original_killpg = qa_dashboard_cdp.os.killpg
+        interrupted = False
+
+        def interrupted_stop():
+            nonlocal stop_attempts
+            stop_attempts += 1
+            qa_dashboard_cdp.stop_owned_group(process, process.pid)
+
+        def interrupt_killpg(pgid, sig):
+            nonlocal interrupted
+            if not interrupted and sig == 0:
+                interrupted = True
+                raise cancellation
+            return original_killpg(pgid, sig)
+
+        def close_profile():
+            profile.cleanup()
+            later_steps.append("profile")
+
+        def close_server():
+            server.shutdown()
+            server.server_close()
+            server_thread.join(timeout=3)
+            later_steps.append("servers")
+
+        try:
+            with (
+                patch.object(qa_dashboard_cdp.os, "killpg", side_effect=interrupt_killpg),
+                self.assertRaises(StopInterrupted) as raised,
+            ):
+                qa_dashboard_cdp.run_cleanup_steps(
+                    None,
+                    [
+                        interrupted_stop,
+                        close_profile,
+                        close_server,
+                    ],
+                )
+        finally:
+            if process.poll() is None:
+                qa_dashboard_cdp.stop_owned_group(process, process.pid)
+            if profile_path.exists():
+                profile.cleanup()
+            if server.fileno() != -1:
+                server.shutdown()
+                server.server_close()
+            server_thread.join(timeout=3)
+
+        self.assertIs(raised.exception, cancellation)
+        self.assertEqual(stop_attempts, 2)
+        self.assertIsNotNone(process.poll())
+        self.assertEqual(later_steps, ["profile", "servers"])
+        self.assertFalse(profile_path.exists())
+        self.assertEqual(server.fileno(), -1)
+        self.assertFalse(server_thread.is_alive())
+
+    def test_demo_server_cleanup_resumes_interrupted_shutdown(self):
+        class ShutdownInterrupted(BaseException):
+            pass
+
+        cancellation = ShutdownInterrupted("shutdown-first")
+        original_server = qa_dashboard_cdp.ThreadingHTTPServer
+        created = []
+        shutdown_attempts = 0
+
+        def interruptible_server(*args, **kwargs):
+            nonlocal shutdown_attempts
+            server = original_server(*args, **kwargs)
+            original_shutdown = server.shutdown
+
+            def shutdown():
+                nonlocal shutdown_attempts
+                shutdown_attempts += 1
+                if shutdown_attempts == 1:
+                    raise cancellation
+                return original_shutdown()
+
+            server.shutdown = shutdown
+            created.append(server)
+            return server
+
+        fixture = ROOT / "tests" / "fixtures" / "demo_snapshot_v1.json"
+        with patch.object(qa_dashboard_cdp, "ThreadingHTTPServer", side_effect=interruptible_server):
+            context = qa_dashboard_cdp.demo_server(fixture, b"js", b"css")
+            context.__enter__()
+            with self.assertRaises(ShutdownInterrupted) as raised:
+                context.__exit__(None, None, None)
+
+        self.assertIs(raised.exception, cancellation)
+        self.assertEqual(shutdown_attempts, 2)
+        self.assertEqual(len(created), 1)
+        self.assertEqual(created[0].fileno(), -1)
 
     @unittest.skipUnless(hasattr(os, "memfd_create"), "Linux memfd required")
     def test_main_teardown_survives_cdp_baseexceptions_and_closes_real_resources(self):
