@@ -13,13 +13,24 @@ from typing import Iterable, Sequence
 
 
 DEFAULT_MAX_ENTRIES = 100_000
+MAX_ARCHIVE_BYTES = 8 * 1024 * 1024
+MAX_MEMBER_BYTES = 4 * 1024 * 1024
+MAX_NAME_BYTES = 4096
 _ERROR = "error: archive/extraction path parity failed\n"
 
 
-def _normalized_member_name(name: str) -> str:
-    stripped = name.rstrip("/")
-    path = PurePosixPath(stripped)
-    if not stripped or path.is_absolute() or any(part in ("", ".", "..") for part in path.parts):
+def _normalized_member_name(name: str, *, is_directory: bool) -> str:
+    try:
+        name_size = len(name.encode("utf-8"))
+    except UnicodeEncodeError as error:
+        raise ValueError("unsafe archive member") from error
+    if not name or name_size > MAX_NAME_BYTES or name.startswith("/"):
+        raise ValueError("unsafe archive member")
+    raw = name[:-1] if is_directory and name.endswith("/") else name
+    if not raw or any(part in ("", ".", "..") for part in raw.split("/")):
+        raise ValueError("unsafe archive member")
+    path = PurePosixPath(raw)
+    if path.is_absolute():
         raise ValueError("unsafe archive member")
     return path.as_posix()
 
@@ -40,14 +51,19 @@ def _bounded_names(names: Iterable[str], max_entries: int) -> frozenset[str]:
 
 
 def _archive_names(archive: Path, max_entries: int) -> frozenset[str]:
+    if archive.stat().st_size > MAX_ARCHIVE_BYTES:
+        raise ValueError("archive byte bound exceeded")
     with tarfile.open(archive, mode="r:*") as handle:
         def names() -> Iterable[str]:
             for member in handle:
-                if member.issym() or member.islnk():
-                    raise ValueError("archive links are not permitted")
-                if not (member.isdir() or member.isfile()):
+                if member.type not in (tarfile.DIRTYPE, tarfile.REGTYPE):
                     raise ValueError("special archive entries are not permitted")
-                yield _normalized_member_name(member.name)
+                if member.size < 0 or member.size > MAX_MEMBER_BYTES:
+                    raise ValueError("archive member byte bound exceeded")
+                yield _normalized_member_name(
+                    member.name,
+                    is_directory=member.type == tarfile.DIRTYPE,
+                )
 
         return _bounded_names(names(), max_entries)
 

@@ -7,7 +7,14 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from scripts.check_archive_parity import check_parity, main, validate_archive
+from scripts.check_archive_parity import (
+    MAX_ARCHIVE_BYTES,
+    MAX_MEMBER_BYTES,
+    MAX_NAME_BYTES,
+    check_parity,
+    main,
+    validate_archive,
+)
 
 
 class ArchiveParityTests(unittest.TestCase):
@@ -145,6 +152,53 @@ class ArchiveParityTests(unittest.TestCase):
 
             validate_archive(archive)
             self.assertEqual(main(["--archive", str(archive)]), 0)
+
+    def test_rejects_oversized_archive_before_tar_parsing(self):
+        with TemporaryDirectory() as temp_dir:
+            archive = Path(temp_dir) / "oversized.tar"
+            with archive.open("wb") as handle:
+                handle.truncate(MAX_ARCHIVE_BYTES + 1)
+
+            with self.assertRaises(ValueError):
+                validate_archive(archive)
+            self.assertEqual(main(["--archive", str(archive)]), 2)
+
+    def test_rejects_oversized_logical_member_and_name(self):
+        with TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            oversized_member = tarfile.TarInfo("large.txt")
+            oversized_member.size = MAX_MEMBER_BYTES + 1
+            oversized_name = tarfile.TarInfo("n" * (MAX_NAME_BYTES + 1))
+            for filename, member in (("member.tar", oversized_member), ("name.tar", oversized_name)):
+                archive = base / filename
+                with tarfile.open(archive, "w") as handle:
+                    handle.addfile(member)
+                with self.subTest(filename=filename), self.assertRaises(ValueError):
+                    validate_archive(archive)
+
+    def test_rejects_sparse_and_contiguous_regular_like_types(self):
+        with TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            for entry_type in (tarfile.GNUTYPE_SPARSE, tarfile.CONTTYPE):
+                archive = base / f"type-{entry_type.hex()}.tar"
+                member = tarfile.TarInfo("file.txt")
+                member.type = entry_type
+                with tarfile.open(archive, "w") as handle:
+                    handle.addfile(member)
+                with self.subTest(entry_type=entry_type), self.assertRaises(ValueError):
+                    validate_archive(archive)
+
+    def test_rejects_raw_unsafe_paths_before_normalization(self):
+        with TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            for index, name in enumerate((".", "./", "./ok", "a//b", "a/./b", "..", "/absolute")):
+                archive = base / f"unsafe-{index}.tar"
+                member = tarfile.TarInfo(name)
+                member.type = tarfile.DIRTYPE if name.endswith("/") else tarfile.REGTYPE
+                with tarfile.open(archive, "w") as handle:
+                    handle.addfile(member)
+                with self.subTest(name=name), self.assertRaises(ValueError):
+                    validate_archive(archive)
 
 
 if __name__ == "__main__":

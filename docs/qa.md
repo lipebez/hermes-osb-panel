@@ -29,6 +29,7 @@ QA_PARENT="$(dirname "$REPO_ROOT")"
 QA_CONTAINER=""
 QA_ROOT=""
 EVIDENCE_TMP_ROOT=""
+MAX_ARCHIVE_BYTES=$((8 * 1024 * 1024))
 cleanup() {
   status=$?
   set +e
@@ -49,8 +50,8 @@ cleanup() {
   fi
   exit "$cleanup_status"
 }
-QA_CONTAINER="$(mktemp -d "$QA_PARENT/.hermes-osb-panel-release.XXXXXX")"
 trap cleanup EXIT
+QA_CONTAINER="$(mktemp -d "$QA_PARENT/.hermes-osb-panel-release.XXXXXX")"
 QA_ROOT="$QA_CONTAINER/candidate-worktree"
 EVIDENCE_TMP_ROOT="$(mktemp -d /tmp/hermes-osb-panel-evidence.XXXXXX)"
 git -C "$REPO_ROOT" worktree add --detach "$QA_ROOT" "$CANDIDATE_SHA"
@@ -76,6 +77,7 @@ assert_archive_digest() {
   test ! -L "$CANDIDATE_ARCHIVE"
   test "$(stat -c '%a' "$CANDIDATE_ARCHIVE")" = 444
   test "$(stat -c '%h' "$CANDIDATE_ARCHIVE")" = 1
+  test "$(stat -c '%s' "$CANDIDATE_ARCHIVE")" -le "$MAX_ARCHIVE_BYTES"
   test "$(sha256sum "$CANDIDATE_ARCHIVE" | cut -d ' ' -f 1)" = "$CANDIDATE_ARCHIVE_SHA256"
 }
 assert_archive_parity() {
@@ -113,7 +115,9 @@ assert_candidate_worktree
 (cd "$QA_ROOT" && PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests -v) \
   2>&1 | tee "$TEST_LOG"
 assert_candidate_worktree
-TESTS_RUN="$(python3 -c 'import pathlib, re, sys; matches=re.findall(r"Ran (\d+) tests?", pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")); print(matches[-1] if matches else "")' "$TEST_LOG")"
+DISCOVERED_TESTS="$(python3 -c 'import pathlib, re, sys; matches=re.findall(r"^Ran (\d+) tests? in [0-9.]+s$", pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"), re.MULTILINE); len(matches) == 1 or sys.exit(1); print(matches[0])' "$TEST_LOG")"
+printf 'Ran %s tests\n' "$DISCOVERED_TESTS" >> "$TEST_LOG"
+TESTS_RUN="$(python3 -c 'import pathlib, re, sys; matches=re.findall(r"^Ran (\d+) tests?$", pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"), re.MULTILINE); len(matches) == 1 or sys.exit(1); print(matches[0])' "$TEST_LOG")"
 test -n "$TESTS_RUN"
 TESTS_PASSED="$TESTS_RUN"
 TESTS_FAILED=0  # reached only after the suite pipeline succeeded
@@ -173,7 +177,7 @@ python3 -B -m json.tool "$EVIDENCE_OUTPUT"
 
 Node syntax, tracked-file AST parsing, and the complete current suite run only in the disposable detached worktree. Its sibling location under the repository parent preserves the three path-sensitive contracts: a real Git object database and exact `HEAD`, repository `.gitignore` semantics, and a repository root outside `/tmp`. Exact-HEAD, status, unstaged-diff, and staged-diff checks run immediately before and after each Node, AST, and suite gate. The canonical checkout is required clean before worktree creation and checked again after all gates.
 
-The scanner consumes the single tar directly. Its regular-file type, link count, read-only mode, and SHA-256 are checked before and after scanning, extraction, and Doctor. Before extraction, the bounded helper rejects duplicate or unsafe paths, symbolic links, hard links, special entries, and excessive fanout. GNU tar checks content/type/mode parity, while the helper rejects extra paths, symbolic links, hard-linked regular files, and special extracted entries before and after Doctor. These checks establish stable candidate/archive identity for an operator-controlled run; they do not make pathnames immutable against a hostile concurrent process with the same privileges. Test and gate values become true only after their commands pass, and the summary records the candidate SHA, archive SHA-256, and explicit Doctor success. The EXIT trap preserves the original failing status, attempts every cleanup step, and reports cleanup failure after a successful run; it removes the registered worktree, sibling QA container, `/tmp` evidence directory, logs, archive, extraction, and isolated Hermes home.
+The scanner consumes the single tar directly. Its regular-file type, link count, read-only mode, SHA-256, and 8 MiB archive-size ceiling are checked before and after scanning, extraction, and Doctor. Before extraction, the bounded helper rejects raw unsafe paths, duplicate paths, names over 4096 UTF-8 bytes, members over 4 MiB logical size, archive types other than exact regular files and directories, and more than 100,000 entries. The public-release scanner applies the same archive, member, name, type, and entry bounds and reads at most 4 MiB plus one byte from each regular member. GNU tar checks content/type/mode parity, while the helper rejects extra paths, symbolic links, hard-linked regular files, and special extracted entries before and after Doctor. These checks establish stable candidate/archive identity for an operator-controlled run; they do not make pathnames immutable against a hostile concurrent process with the same privileges. Test and gate values become true only after their commands pass, and the summary records the candidate SHA, archive SHA-256, and explicit Doctor success. The EXIT trap is installed before either temporary directory allocation, preserves the original failing status, attempts every cleanup step, and reports cleanup failure after a successful run; it removes the registered worktree, sibling QA container, `/tmp` evidence directory, logs, archive, extraction, and isolated Hermes home.
 
 ## Isolated clean-install harness
 

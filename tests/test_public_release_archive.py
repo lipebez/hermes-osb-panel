@@ -10,6 +10,8 @@ from pathlib import Path
 
 from scripts.check_public_release import (
     ALLOWED_BINARY_ARCHIVE_PATHS,
+    MAX_ARCHIVE_BYTES,
+    MAX_MEMBER_BYTES,
     format_findings,
     main,
     scan_archive_bytes,
@@ -180,6 +182,48 @@ class PublicReleaseArchiveScannerTests(unittest.TestCase):
 
             self.assertEqual(result, 0)
             self.assertEqual(stderr.getvalue(), "")
+
+    def test_pure_scanner_rejects_archive_and_member_bounds(self):
+        with self.assertRaises(ValueError):
+            scan_archive_bytes(b"x" * (MAX_ARCHIVE_BYTES + 1))
+
+        output = io.BytesIO()
+        with tarfile.open(fileobj=output, mode="w") as archive:
+            member = tarfile.TarInfo("large.txt")
+            member.size = MAX_MEMBER_BYTES + 1
+            archive.addfile(member)
+        with self.assertRaises(ValueError):
+            scan_archive_bytes(output.getvalue())
+
+    def test_scanner_rejects_sparse_contiguous_and_raw_unsafe_names(self):
+        cases = [
+            ("sparse", "safe.txt", tarfile.GNUTYPE_SPARSE),
+            ("contiguous", "safe.txt", tarfile.CONTTYPE),
+        ] + [(f"path-{index}", name, tarfile.REGTYPE) for index, name in enumerate(
+            (".", "./", "./ok", "a//b", "a/./b", "..", "/absolute")
+        )]
+        for label, name, entry_type in cases:
+            output = io.BytesIO()
+            with tarfile.open(fileobj=output, mode="w") as archive:
+                member = tarfile.TarInfo(name)
+                member.type = entry_type
+                archive.addfile(member)
+            payload = output.getvalue()
+            with self.subTest(label=label), self.assertRaises(ValueError):
+                scan_archive_bytes(payload)
+            with tempfile.TemporaryDirectory() as temporary:
+                archive_path = Path(temporary) / "candidate.tar"
+                archive_path.write_bytes(payload)
+                with contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(main(["--archive", str(archive_path)]), 2)
+
+    def test_cli_rejects_oversized_archive(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            archive = Path(temporary) / "oversized.tar"
+            with archive.open("wb") as handle:
+                handle.truncate(MAX_ARCHIVE_BYTES + 1)
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(main(["--archive", str(archive)]), 2)
 
 
 if __name__ == "__main__":

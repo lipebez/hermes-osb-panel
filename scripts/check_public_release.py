@@ -19,6 +19,10 @@ from pathlib import Path, PurePosixPath
 from typing import Iterable
 
 
+MAX_ARCHIVE_BYTES = 8 * 1024 * 1024
+MAX_MEMBER_BYTES = 4 * 1024 * 1024
+MAX_NAME_BYTES = 4096
+MAX_ENTRIES = 100_000
 ALLOWED_BINARY_ARCHIVE_PATHS = frozenset({"tests/fixtures/release_scanner_neutral.png"})
 BINARY_MEDIA_SUFFIXES = frozenset(
     {
@@ -109,20 +113,56 @@ def _categories_for_file(filename: str, content: bytes) -> tuple[str, ...]:
     return tuple(categories)
 
 
+def _safe_member_name(name: str, *, is_directory: bool) -> str:
+    try:
+        name_size = len(name.encode("utf-8"))
+    except UnicodeEncodeError as error:
+        raise ValueError("unsafe archive member") from error
+    if not name or name_size > MAX_NAME_BYTES or name.startswith("/"):
+        raise ValueError("unsafe archive member")
+    raw = name[:-1] if is_directory and name.endswith("/") else name
+    if not raw or any(part in ("", ".", "..") for part in raw.split("/")):
+        raise ValueError("unsafe archive member")
+    path = PurePosixPath(raw)
+    if path.is_absolute():
+        raise ValueError("unsafe archive member")
+    return path.as_posix()
+
+
 def scan_archive_bytes(payload: bytes) -> list[Finding]:
     """Return filename/category findings from a Git archive tar payload only."""
+    if len(payload) > MAX_ARCHIVE_BYTES:
+        raise ValueError("archive byte bound exceeded")
     findings: list[Finding] = []
+    names: set[str] = set()
+    count = 0
     with tarfile.open(fileobj=io.BytesIO(payload), mode="r:") as archive:
         for member in archive:
-            if not member.isfile():
+            count += 1
+            if count > MAX_ENTRIES:
+                raise ValueError("entry bound exceeded")
+            if member.type not in (tarfile.DIRTYPE, tarfile.REGTYPE):
+                raise ValueError("special archive entry")
+            if member.size < 0 or member.size > MAX_MEMBER_BYTES:
+                raise ValueError("archive member byte bound exceeded")
+            filename = _safe_member_name(
+                member.name,
+                is_directory=member.type == tarfile.DIRTYPE,
+            )
+            if filename in names:
+                raise ValueError("duplicate archive path")
+            names.add(filename)
+            if member.type == tarfile.DIRTYPE:
                 continue
             extracted = archive.extractfile(member)
             if extracted is None:
-                continue
-            content = extracted.read()
+                raise ValueError("unreadable archive member")
+            content = extracted.read(MAX_MEMBER_BYTES + 1)
+            if len(content) != member.size or len(content) > MAX_MEMBER_BYTES:
+                raise ValueError("archive member byte bound exceeded")
             findings.extend(
-                Finding(member.name, category)
-                for category in _categories_for_file(member.name, content)
+                Finding(filename, category)
+                for category in _categories_for_file(filename, content)
             )
     return findings
 
@@ -142,13 +182,28 @@ def _head_exists() -> bool:
 
 
 def _git_archive_head() -> bytes | None:
-    result = subprocess.run(
+    process = subprocess.Popen(
         ["git", "archive", "--format=tar", "HEAD"],
-        check=False,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
     )
-    return result.stdout if result.returncode == 0 else None
+    assert process.stdout is not None
+    payload = process.stdout.read(MAX_ARCHIVE_BYTES + 1)
+    if len(payload) > MAX_ARCHIVE_BYTES:
+        process.kill()
+        process.wait()
+        return None
+    return payload if process.wait() == 0 else None
+
+
+def _read_archive(path: Path) -> bytes:
+    if path.stat().st_size > MAX_ARCHIVE_BYTES:
+        raise ValueError("archive byte bound exceeded")
+    with path.open("rb") as handle:
+        payload = handle.read(MAX_ARCHIVE_BYTES + 1)
+    if len(payload) > MAX_ARCHIVE_BYTES:
+        raise ValueError("archive byte bound exceeded")
+    return payload
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -162,13 +217,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.archive is not None:
         try:
-            payload = args.archive.read_bytes()
-        except OSError:
+            payload = _read_archive(args.archive)
+        except (OSError, ValueError):
             print("public release scanner: could not read supplied archive.", file=sys.stderr)
             return 2
         try:
             rendered = format_findings(scan_archive_bytes(payload))
-        except (OSError, tarfile.TarError):
+        except (OSError, tarfile.TarError, ValueError):
             print("public release scanner: supplied archive is not a readable tar.", file=sys.stderr)
             return 2
         if rendered:
@@ -188,7 +243,11 @@ def main(argv: list[str] | None = None) -> int:
         print("public release scanner: git archive HEAD failed.", file=sys.stderr)
         return 2
 
-    rendered = format_findings(scan_archive_bytes(payload))
+    try:
+        rendered = format_findings(scan_archive_bytes(payload))
+    except (OSError, tarfile.TarError, ValueError):
+        print("public release scanner: git archive HEAD is not a readable bounded tar.", file=sys.stderr)
+        return 2
     if rendered:
         print(rendered)
         return 1
