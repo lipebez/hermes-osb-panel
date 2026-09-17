@@ -371,6 +371,15 @@ class RepositorySafetyTests(unittest.TestCase):
             with self.subTest(action=action):
                 self.assertRegex(revision, r"^[0-9a-f]{40}$")
 
+    def test_ci_uses_runner_context_only_after_job_dispatch(self):
+        ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        job_start = ci.index("  hermes-runtime-contracts:")
+        steps_start = ci.index("    steps:", job_start)
+        job_header = ci[job_start:steps_start]
+
+        self.assertNotIn("${{ runner.", job_header)
+        self.assertGreaterEqual(ci[steps_start:].count("${{ runner.temp }}"), 3)
+
     def test_docs_describe_redirect_and_release_state_without_stale_claims(self):
         qa = (ROOT / "docs" / "qa.md").read_text(encoding="utf-8")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")

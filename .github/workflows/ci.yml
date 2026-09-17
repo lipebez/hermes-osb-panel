@@ -43,11 +43,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      HOME: ${{ runner.temp }}/hermes-user
       HERMES_UPSTREAM_COMMIT: dfc28b61a0cfed58bcc200038c6bfec6f31adcd2
-      HERMES_HOME: ${{ runner.temp }}/hermes-home
-      HERMES_INSTALL_DIR: ${{ runner.temp }}/hermes-agent
-      HERMES_CLI: ${{ runner.temp }}/hermes-agent/venv/bin/hermes
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -55,6 +51,11 @@ jobs:
           persist-credentials: false
 
       - name: Install pinned Hermes in an isolated directory
+        env:
+          HOME: ${{ runner.temp }}/hermes-user
+          HERMES_HOME: ${{ runner.temp }}/hermes-home
+          HERMES_INSTALL_DIR: ${{ runner.temp }}/hermes-agent
+          HERMES_CLI: ${{ runner.temp }}/hermes-agent/venv/bin/hermes
         run: |
           curl --proto '=https' --tlsv1.2 -fsSL \
             "https://raw.githubusercontent.com/NousResearch/hermes-agent/${HERMES_UPSTREAM_COMMIT}/scripts/install.sh" \
@@ -73,7 +74,17 @@ jobs:
           test -x "${HERMES_CLI}"
 
       - name: Validate catalog admission contract
+        env:
+          HOME: ${{ runner.temp }}/hermes-user
+          HERMES_HOME: ${{ runner.temp }}/hermes-home
+          HERMES_INSTALL_DIR: ${{ runner.temp }}/hermes-agent
+          HERMES_CLI: ${{ runner.temp }}/hermes-agent/venv/bin/hermes
         run: ${HERMES_CLI} plugins validate . --json
 
       - name: Validate runtime plugin contracts
+        env:
+          HOME: ${{ runner.temp }}/hermes-user
+          HERMES_HOME: ${{ runner.temp }}/hermes-home
+          HERMES_INSTALL_DIR: ${{ runner.temp }}/hermes-agent
+          HERMES_CLI: ${{ runner.temp }}/hermes-agent/venv/bin/hermes
         run: ${HERMES_CLI} plugins doctor . --ci
