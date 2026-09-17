@@ -5,6 +5,7 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
 import tomllib
 import unittest
 from pathlib import Path
@@ -400,6 +401,54 @@ class DashboardAssetTests(unittest.TestCase):
         ):
             qa_dashboard_cdp.stop_owned_group(process, process.pid + 1)
         foreign_kill.assert_not_called()
+
+    def test_cdp_main_switches_real_popen_topology_only_for_internal_flag(self):
+        class Chromium:
+            pid = 43210
+            alive = True
+            def poll(self):
+                return None if self.alive else 0
+            def terminate(self):
+                self.alive = False
+            def kill(self):
+                self.alive = False
+            def wait(self, timeout=None):
+                self.alive = False
+                return 0
+
+        class FakeCDP:
+            events = []
+            def __init__(self, url):
+                self.url = url
+            def call(self, method, params=None):
+                return {}
+            def close(self):
+                pass
+
+        for inherit in (False, True):
+            with self.subTest(inherit=inherit), tempfile.TemporaryDirectory() as temporary:
+                process = Chromium()
+                argv = ["--url", "http:" + "//" + "127.0.0.1:8123/second-brain", "--output", temporary,
+                        "--chromium", "/bin/true", "--viewport", "390x844"]
+                if inherit:
+                    argv.append("--inherit-runner-process-group")
+                result = {"viewport": {"width": 390, "height": 844}, "checks": [],
+                          "metrics": {}, "probes": {}, "console_errors": [], "screenshot": "shot.png"}
+                with (
+                    patch.object(qa_dashboard_cdp.subprocess, "Popen", return_value=process) as popen,
+                    patch.object(qa_dashboard_cdp, "free_port", return_value=9222),
+                    patch.object(qa_dashboard_cdp, "get_json", return_value=[{"type": "page", "webSocketDebuggerUrl": "ws://test"}]),
+                    patch.object(qa_dashboard_cdp, "CDP", FakeCDP),
+                    patch.object(qa_dashboard_cdp, "local_auth_cookie", return_value=None),
+                    patch.object(qa_dashboard_cdp, "run_viewport", return_value=result),
+                    patch.object(qa_dashboard_cdp, "stop_owned_group") as stop_group,
+                ):
+                    self.assertEqual(qa_dashboard_cdp.main(argv), 0)
+                self.assertEqual(popen.call_args.kwargs["start_new_session"], not inherit)
+                if inherit:
+                    stop_group.assert_not_called()
+                else:
+                    stop_group.assert_called_once_with(process, process.pid)
 
     def test_cdp_harness_accepts_dashboard_session_header_without_logging_it(self):
         qa = (ROOT / "scripts" / "qa_dashboard_cdp.py").read_text(encoding="utf-8")

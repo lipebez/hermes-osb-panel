@@ -124,6 +124,19 @@ def stop_owned_group(process: Any, pgid: int, timeout: float = 6.0) -> None:
             pass
 
 
+def stop_inherited_process(process: Any, timeout: float = 6.0) -> None:
+    """Stop Chromium without signalling the runner group that owns it."""
+    if process.poll() is not None:
+        process.wait(timeout=0)
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=timeout)
+
+
 @contextmanager
 def demo_server(fixture: Path):
     """Serve source assets and one synthetic fixture without external effects."""
@@ -876,14 +889,15 @@ def run_viewport(cdp: CDP, url: str, out: Path, width: int, height: int) -> dict
     return {"viewport": {"width": width, "height": height}, "metrics": metrics, "probes": probes, "checks": checks, "console_errors": errors, "screenshot": str(screenshot)}
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", required=True, type=parse_loopback_url)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--fixture", type=Path, help="serve this sanitized fixture with source assets for shareable demo QA")
     parser.add_argument("--chromium", type=Path, help="pre-resolved Chromium executable")
+    parser.add_argument("--inherit-runner-process-group", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--viewport", dest="viewports", action="append", type=parse_viewport, help="repeatable WIDTHxHEIGHT; defaults to 1440x900, 1024x768 and 390x844")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     viewports = args.viewports or DEFAULT_VIEWPORTS
     args.output.mkdir(parents=True, exist_ok=True)
     chromium = str(args.chromium.resolve()) if args.chromium else (shutil.which("chromium") or shutil.which("chromium-browser"))
@@ -893,20 +907,23 @@ def main() -> int:
     demo_context = demo_server(args.fixture) if args.fixture else None
     run_url = demo_context.__enter__() if demo_context else args.url
     port = free_port()
+    runner_pgid = os.getpgrp()
+    if not isinstance(runner_pgid, int) or runner_pgid <= 0:
+        raise RuntimeError("CDP runner process group identity was unavailable")
     with tempfile.TemporaryDirectory(prefix="hermes-osb-cdp-") as profile:
         process = subprocess.Popen(
             [chromium, "--headless=new", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", "--hide-scrollbars", "--remote-allow-origins=*", f"--remote-debugging-port={port}", f"--user-data-dir={profile}", "about:blank"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            start_new_session=True,
+            start_new_session=not args.inherit_runner_process_group,
         )
-        try:
-            chromium_pgid = os.getpgid(process.pid)
-        except OSError:
+        chromium_pid = getattr(process, "pid", None)
+        if not isinstance(chromium_pid, int) or chromium_pid <= 0:
             process.kill()
             process.wait(timeout=2)
-            raise
-        if chromium_pgid != process.pid or chromium_pgid == os.getpgrp():
+            raise RuntimeError("Chromium process identity was unavailable")
+        chromium_pgid = None if args.inherit_runner_process_group else chromium_pid
+        if chromium_pgid is not None and chromium_pgid == runner_pgid:
             process.kill()
             process.wait(timeout=2)
             raise RuntimeError("Chromium process group identity was unsafe")
@@ -958,7 +975,10 @@ def main() -> int:
         finally:
             if cdp:
                 cdp.close()
-            stop_owned_group(process, chromium_pgid)
+            if chromium_pgid is None:
+                stop_inherited_process(process)
+            else:
+                stop_owned_group(process, chromium_pgid)
             if demo_context:
                 demo_context.__exit__(None, None, None)
 

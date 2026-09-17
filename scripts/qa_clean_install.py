@@ -491,20 +491,18 @@ def _wait_json(
 
 
 def _spawn_owned(popen: Callable[..., Any], command: Sequence[str], *,
-                 getpgid: Callable[[int], int] = os.getpgid,
                  getpgrp: Callable[[], int] = os.getpgrp, **kwargs: Any) -> OwnedProcess:
+    harness_pgid = getpgrp()
+    if not isinstance(harness_pgid, int) or harness_pgid <= 0:
+        raise QAFailure("harness process group identity was unavailable")
     process = popen(list(command), start_new_session=True, **kwargs)
     pid = getattr(process, "pid", None)
     if not isinstance(pid, int) or pid <= 0:
         raise QAFailure("owned process identity was unavailable")
-    try:
-        pgid = getpgid(pid)
-        harness_pgid = getpgrp()
-    except OSError as exc:
-        raise QAFailure("owned process group identity was unavailable") from exc
-    if pgid != pid or pgid <= 0 or pgid == harness_pgid:
+    owned = OwnedProcess(process, pid, harness_pgid)
+    if owned.pgid == harness_pgid:
         raise QAFailure("owned process group identity was unsafe")
-    return OwnedProcess(process, pgid, harness_pgid)
+    return owned
 
 
 def _group_exists(pgid: int, killpg: Callable[[int, int], None]) -> bool:
@@ -620,7 +618,7 @@ def run_clean_install(
     monotonic: Callable[[], float] = time.monotonic, which: Callable[..., str | None] = shutil.which,
     killpg: Callable[[int, int], None] = os.killpg, timeout: float = TOTAL_TIMEOUT,
     listener_owned: Callable[[OwnedProcess, int], bool] = _listener_is_owned,
-    getpgid: Callable[[int], int] = os.getpgid, getpgrp: Callable[[], int] = os.getpgrp,
+    getpgrp: Callable[[], int] = os.getpgrp,
 ) -> dict[str, Any]:
     if sys.platform != "linux":
         raise QAFailure("the real clean-install harness is Linux-only")
@@ -676,7 +674,7 @@ def run_clean_install(
                     [hermes_executable, "dashboard", "--host", "127.0.0.1", "--port", str(port), "--no-open", "--skip-build"],
                     env=env, cwd=str(ROOT), stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    getpgid=getpgid, getpgrp=getpgrp,
+                    getpgrp=getpgrp,
                 )
                 try:
                     ready_deadline = min(operation_deadline, monotonic() + DASHBOARD_READY_TIMEOUT)
@@ -714,10 +712,10 @@ def run_clean_install(
                 [python_executable, str(ROOT / "scripts" / "qa_dashboard_cdp.py"),
                  "--chromium", browser_executable, "--url", base_url + "/second-brain",
                  "--fixture", str(ROOT / "tests" / "fixtures" / "demo_snapshot_v1.json"),
-                 "--output", str(cdp_output)],
+                 "--output", str(cdp_output), "--inherit-runner-process-group"],
                 env=env, cwd=str(ROOT), stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                getpgid=getpgid, getpgrp=getpgrp,
+                getpgrp=getpgrp,
             )
             try:
                 returncode = cdp.process.wait(timeout=min(COMMAND_TIMEOUT, _remaining(operation_deadline, monotonic)))
@@ -730,7 +728,12 @@ def run_clean_install(
         except BaseException as exc:
             first_error = exc
         finally:
-            cleanup_deadline = min(deadline, monotonic() + CLEANUP_TIMEOUT)
+            try:
+                cleanup_deadline = min(deadline, monotonic() + CLEANUP_TIMEOUT)
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+                cleanup_deadline = deadline
 
             def cleanup_step(label: str, operation: Callable[[], Any]) -> None:
                 nonlocal first_error
@@ -744,11 +747,17 @@ def run_clean_install(
                     except (KeyboardInterrupt, SystemExit) as exc:
                         if first_error is None:
                             first_error = exc
-                        if interrupted or monotonic() >= cleanup_deadline:
+                        try:
+                            expired = monotonic() >= cleanup_deadline
+                        except BaseException as clock_exc:
+                            if first_error is None:
+                                first_error = clock_exc
+                            expired = True
+                        if interrupted or expired:
                             cleanup_errors.append(label)
                             return
                         interrupted = True
-                    except Exception as exc:
+                    except BaseException as exc:
                         if first_error is None:
                             first_error = exc
                         cleanup_errors.append(label)

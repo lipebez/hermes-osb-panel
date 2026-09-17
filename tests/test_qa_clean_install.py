@@ -148,7 +148,7 @@ class Harness:
             sleep=self.clock.sleep, port_picker=lambda: 43123,
             monotonic=self.clock.monotonic, killpg=self.killpg,
             listener_owned=lambda owned, port: True,
-            getpgid=lambda pid: pid, getpgrp=lambda: 999,
+            getpgrp=lambda: 999,
             which=lambda value, path="": (
                 "/opt/hermes/bin/hermes" if value == "hermes" else "/usr/bin/chromium"
             ),
@@ -600,6 +600,28 @@ class HardeningRegressionTests(unittest.TestCase):
                        killpg, clock.sleep, lambda: 999)
         self.assertEqual(signals, [qa.signal.SIGTERM, qa.signal.SIGKILL])
 
+    def test_spawn_records_group_even_if_leader_dies_immediately(self):
+        clock = Clock()
+        process = Process()
+        process.alive = False
+        exists = True
+        signals = []
+        owned = qa._spawn_owned(lambda command, **kwargs: process, ["worker"], getpgrp=lambda: 999)
+
+        def killpg(pgid, sig):
+            nonlocal exists
+            if sig == 0:
+                if not exists:
+                    raise ProcessLookupError()
+                return
+            signals.append(sig)
+            if sig == qa.signal.SIGKILL:
+                exists = False
+
+        qa._stop_owned(owned, 5, clock.monotonic, killpg, clock.sleep, lambda: 999)
+        self.assertEqual(owned.pgid, process.pid)
+        self.assertEqual(signals, [qa.signal.SIGTERM, qa.signal.SIGKILL])
+
     def test_global_deadline_bounds_commands_and_preserves_cancellation(self):
         clock = Clock()
         seen = []
@@ -663,6 +685,42 @@ class HardeningRegressionTests(unittest.TestCase):
                 self.assertGreaterEqual(sum("plugins list --json" in action for action in actions), 2)
                 self.assertFalse(harness.installed)
 
+    def test_cleanup_survives_interrupt_on_first_finally_clock_read(self):
+        harness = Harness()
+        original_popen = harness.popen
+        armed = False
+        interrupted = False
+
+        def popen(command, **kwargs):
+            process = original_popen(command, **kwargs)
+            if any(str(item).endswith("qa_dashboard_cdp.py") for item in command):
+                original_wait = process.wait
+                def wait(timeout=None):
+                    nonlocal armed
+                    result = original_wait(timeout)
+                    armed = True
+                    return result
+                process.wait = wait
+            return process
+
+        original_monotonic = harness.clock.monotonic
+        def monotonic():
+            nonlocal interrupted
+            if armed and not interrupted:
+                interrupted = True
+                raise KeyboardInterrupt()
+            return original_monotonic()
+
+        harness.popen = popen
+        harness.clock.monotonic = monotonic
+        with self.assertRaises(KeyboardInterrupt):
+            harness.execute()
+        actions = [" ".join(call) for call in harness.calls]
+        self.assertTrue(any("plugins disable" in action for action in actions))
+        self.assertTrue(any("plugins remove" in action for action in actions))
+        self.assertGreaterEqual(sum("plugins list --json" in action for action in actions), 2)
+        self.assertFalse(harness.installed)
+
     def test_cdp_is_owned_and_cleaned_after_timeout(self):
         harness = Harness()
         original = harness.popen
@@ -678,6 +736,8 @@ class HardeningRegressionTests(unittest.TestCase):
         self.assertTrue(cdp.terminated)
         self.assertFalse(cdp.killed)
         self.assertTrue(harness.assert_session)
+        cdp_argv = next(call for call in harness.calls if any(str(item).endswith("qa_dashboard_cdp.py") for item in call))
+        self.assertIn("--inherit-runner-process-group", cdp_argv)
 
     def test_port_retry_accepts_only_the_live_new_process(self):
         harness = Harness()
@@ -703,7 +763,7 @@ class HardeningRegressionTests(unittest.TestCase):
             port_picker=lambda: next(ports), monotonic=harness.clock.monotonic,
             killpg=harness.killpg,
             listener_owned=lambda owned, port: True,
-            getpgid=lambda pid: pid, getpgrp=lambda: 999,
+            getpgrp=lambda: 999,
             which=lambda value, path="": "/opt/hermes" if value == "hermes" else "/opt/chromium",
         )
         self.assertTrue(result["passed"])
